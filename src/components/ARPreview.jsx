@@ -49,6 +49,49 @@ export default function ARPreview({ product, onClose }) {
   const countdownRef = useRef(null);
   const isGeneratingRef = useRef(false);
   const resultImageRef = useRef("");
+  const tryOnAbortControllerRef = useRef(null);
+  const closingRef = useRef(false);
+  const mountedRef = useRef(false);
+
+  function canUpdateState() {
+    return mountedRef.current && !closingRef.current;
+  }
+
+  function clearCountdown(resetState = true) {
+    if (countdownRef.current) {
+      window.clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+
+    if (resetState && mountedRef.current) {
+      setCaptureCountdown(0);
+    }
+  }
+
+  function stopCameraStream() {
+    if (framingLoopRef.current) {
+      window.clearTimeout(framingLoopRef.current);
+      framingLoopRef.current = null;
+    }
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  }
+
+  function cancelTryOnGeneration() {
+    if (!tryOnAbortControllerRef.current) {
+      return;
+    }
+
+    tryOnAbortControllerRef.current.abort();
+    tryOnAbortControllerRef.current = null;
+  }
 
   useEffect(() => {
     isGeneratingRef.current = isGenerating;
@@ -59,6 +102,20 @@ export default function ARPreview({ product, onClose }) {
   }, [resultImage]);
 
   useEffect(() => {
+    mountedRef.current = true;
+    closingRef.current = false;
+    return () => {
+      closingRef.current = true;
+      mountedRef.current = false;
+      clearCountdown(false);
+      cancelTryOnGeneration();
+      stopCameraStream();
+    };
+  }, []);
+
+  useEffect(() => {
+    closingRef.current = false;
+    cancelTryOnGeneration();
     setSelectedSize(defaultSize);
     setColorIndex(0);
     setCameraRequested(false);
@@ -81,15 +138,17 @@ export default function ARPreview({ product, onClose }) {
 
     async function startCamera() {
       if (!navigator.mediaDevices?.getUserMedia) {
-        if (!cancelled) {
+        if (!cancelled && canUpdateState()) {
           setCameraState("error");
           setCameraError("Camera preview is not supported in this browser.");
         }
         return;
       }
 
-      setCameraState("loading");
-      setCameraError("");
+      if (canUpdateState()) {
+        setCameraState("loading");
+        setCameraError("");
+      }
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -131,10 +190,15 @@ export default function ARPreview({ product, onClose }) {
           await videoRef.current.play().catch(() => {});
         }
 
+        if (!canUpdateState()) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
         setCameraState("ready");
         stopFraming = startSmartFraming(track);
       } catch (error) {
-        if (!cancelled) {
+        if (!cancelled && canUpdateState()) {
           setCameraState("error");
           setCameraError("Camera access was blocked. Allow camera permission to continue.");
         }
@@ -168,7 +232,9 @@ export default function ARPreview({ product, onClose }) {
             const centerY = (y + height / 2) / video.videoHeight;
             const scale = clamp(0.92 + (0.14 - faceRatio) * 0.85, 0.88, 1.02);
             const offsetY = clamp((0.27 - centerY) * 110, -38, 22);
-            setFraming({ scale, offsetY });
+            if (canUpdateState()) {
+              setFraming({ scale, offsetY });
+            }
 
             if (capabilities.zoom && typeof capabilities.zoom.min === "number" && typeof capabilities.zoom.max === "number") {
               const zoomProgress = clamp((0.11 - faceRatio) / 0.07, 0, 1);
@@ -200,18 +266,8 @@ export default function ARPreview({ product, onClose }) {
     return () => {
       cancelled = true;
       stopFraming();
-      if (framingLoopRef.current) {
-        window.clearTimeout(framingLoopRef.current);
-        framingLoopRef.current = null;
-      }
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
-      }
-      if (countdownRef.current) {
-        window.clearInterval(countdownRef.current);
-        countdownRef.current = null;
-      }
+      stopCameraStream();
+      clearCountdown();
     };
   }, [cameraRequested, product]);
 
@@ -244,6 +300,9 @@ export default function ARPreview({ product, onClose }) {
   }
 
   async function handleTryOn() {
+    const abortController = new AbortController();
+    tryOnAbortControllerRef.current = abortController;
+
     try {
       setGenerationError("");
       setIsGenerating(true);
@@ -256,12 +315,27 @@ export default function ARPreview({ product, onClose }) {
         size: selectedSize,
         material: product.material,
         fit: product.fit,
-      });
+      }, { signal: abortController.signal });
+
+      if (abortController.signal.aborted || closingRef.current) {
+        return;
+      }
+
       setResultImage(payload.result.imageUrl);
     } catch (error) {
+      if (error.name === "AbortError" || abortController.signal.aborted || closingRef.current) {
+        return;
+      }
+
       setGenerationError(error.message);
     } finally {
-      setIsGenerating(false);
+      if (tryOnAbortControllerRef.current === abortController) {
+        tryOnAbortControllerRef.current = null;
+      }
+
+      if (!abortController.signal.aborted && canUpdateState()) {
+        setIsGenerating(false);
+      }
     }
   }
 
@@ -270,21 +344,18 @@ export default function ARPreview({ product, onClose }) {
       return;
     }
 
-    if (countdownRef.current) {
-      window.clearInterval(countdownRef.current);
-      countdownRef.current = null;
-    }
-
     setGenerationError("");
+    clearCountdown();
     setCaptureCountdown(3);
 
     countdownRef.current = window.setInterval(() => {
       setCaptureCountdown((current) => {
         if (current <= 1) {
-          window.clearInterval(countdownRef.current);
-          countdownRef.current = null;
+          clearCountdown();
           window.setTimeout(() => {
-            handleTryOn();
+            if (canUpdateState()) {
+              handleTryOn();
+            }
           }, 80);
           return 0;
         }
@@ -297,7 +368,18 @@ export default function ARPreview({ product, onClose }) {
   return (
     <section className="overlay-shell ar-shell">
       <div className="overlay-card ar-panel">
-        <button type="button" className="close-button" onClick={onClose} aria-label="Close AR preview">
+        <button
+          type="button"
+          className="close-button"
+          onClick={() => {
+            closingRef.current = true;
+            clearCountdown();
+            cancelTryOnGeneration();
+            stopCameraStream();
+            onClose();
+          }}
+          aria-label="Close AR preview"
+        >
           ×
         </button>
 
@@ -329,7 +411,17 @@ export default function ARPreview({ product, onClose }) {
                 <strong>Camera will open for body framing.</strong>
                 <p>Stand 4-6 feet away so your head, shoulders, and torso fit inside the frame.</p>
                 <div className="consent-actions">
-                  <button type="button" className="ghost-button" onClick={onClose}>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      closingRef.current = true;
+                      clearCountdown();
+                      cancelTryOnGeneration();
+                      stopCameraStream();
+                      onClose();
+                    }}
+                  >
                     Cancel
                   </button>
                   <button type="button" className="primary-button" onClick={() => setCameraRequested(true)}>

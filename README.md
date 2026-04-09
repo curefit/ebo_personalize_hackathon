@@ -17,10 +17,19 @@ Hackathon-friendly React + Express kiosk demo for in-store personalization, stoc
 
 ```bash
 npm install
+npm run db:bootstrap
 npm run dev
 ```
 
 Frontend runs on `http://localhost:5173` and the API runs on `http://localhost:8787`.
+
+The app now reads its local catalog from `data/catalog.sqlite`. Bootstrap that DB from the Shopify export with:
+
+```bash
+npm run db:bootstrap -- /absolute/path/to/Export.xlsx
+```
+
+If no path is passed, the bootstrap script will use `PRODUCT_EXPORT_PATH` or the default Downloads export path.
 
 ## Demo flow
 
@@ -34,7 +43,7 @@ Or continue as a guest and answer the 3-step discovery flow.
 
 ## Metabase configuration
 
-Update [`src/utils/constants.js`](/Users/gokul.lakshmanan/Documents/Code/hackathon/src/utils/constants.js) with your Metabase values:
+Update [`src/utils/constants.js`](/Users/ananthapadmanabhakurup/Developer/cultsport/ebo_personalize_hackathon/src/utils/constants.js) with your Metabase values:
 
 ```js
 export const METABASE_CONFIG = {
@@ -47,7 +56,7 @@ export const METABASE_CONFIG = {
 };
 ```
 
-If those values stay as placeholders, the app automatically falls back to local mock data.
+If those values stay as placeholders, the app automatically falls back to the local catalog DB first, then to mock data.
 
 ## API endpoints
 

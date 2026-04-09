@@ -1,10 +1,4 @@
-import fs from "fs";
 import XLSX from "xlsx";
-
-const DEFAULT_EXPORT_PATH =
-  process.env.PRODUCT_EXPORT_PATH || "/Users/gokul.lakshmanan/Downloads/Export_2026-04-08_214743.xlsx";
-
-let cachedCatalog = null;
 
 function stripHtml(value = "") {
   return String(value)
@@ -80,7 +74,7 @@ function getOptionValue(row, optionName) {
   return null;
 }
 
-function parseProductsSheet(filePath) {
+export function parseProductsExport(filePath) {
   const workbook = XLSX.readFile(filePath);
   const sheet = workbook.Sheets.Products;
   if (!sheet) {
@@ -125,7 +119,7 @@ function parseProductsSheet(filePath) {
         vendor: row.Vendor || "",
         total_inventory_qty: 0,
         variants: [],
-        reason: `${row.Type} pick from the live catalog`,
+        reason: `${row.Type} pick from the imported catalog`,
       });
     }
 
@@ -145,8 +139,13 @@ function parseProductsSheet(filePath) {
     if (color) product.colors.push(color);
     if (size) product.sizes.push(size);
 
+    const sourceVariantId = String(row["Variant ID"] || "").trim();
+    const rowNumber = String(row["Row #"] || "").trim();
+    const variantKey = [product.id, sourceVariantId || "no-variant-id", rowNumber || "no-row-number"].join(":");
+
     product.variants.push({
-      variant_id: String(row["Variant ID"] || ""),
+      variant_id: variantKey,
+      source_variant_id: sourceVariantId,
       sku: row["Variant SKU"] || "",
       color: color || "Default",
       size: size || "Free Size",
@@ -161,24 +160,4 @@ function parseProductsSheet(filePath) {
     colors: unique(product.colors),
     sizes: unique(product.sizes),
   }));
-}
-
-export function hasSpreadsheetCatalog() {
-  return fs.existsSync(DEFAULT_EXPORT_PATH);
-}
-
-export function getSpreadsheetCatalog() {
-  if (!hasSpreadsheetCatalog()) {
-    return [];
-  }
-
-  if (!cachedCatalog) {
-    cachedCatalog = parseProductsSheet(DEFAULT_EXPORT_PATH);
-  }
-
-  return cachedCatalog;
-}
-
-export function getSpreadsheetProduct(productId) {
-  return getSpreadsheetCatalog().find((product) => product.id === productId || product.handle === productId) || null;
 }

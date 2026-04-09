@@ -34,9 +34,10 @@ export function fetchInventory(productId) {
   return request(`/api/inventory/${productId}`);
 }
 
-export function generateTryOn(payload) {
+export function generateTryOn(payload, options = {}) {
   return request("/api/tryon", {
     method: "POST",
     body: JSON.stringify(payload),
+    ...options,
   });
 }

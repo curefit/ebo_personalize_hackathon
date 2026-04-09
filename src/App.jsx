@@ -1,4 +1,5 @@
 import { Suspense, lazy, startTransition, useEffect, useMemo, useRef, useState } from "react";
+import AppErrorBoundary from "./components/AppErrorBoundary";
 import ARPreview from "./components/ARPreview";
 import MemberLogin from "./components/MemberLogin";
 import NonMemberQuestions from "./components/NonMemberQuestions";
@@ -28,6 +29,7 @@ export default function App() {
   const memberLookupRequestRef = useRef(null);
   const memberLookupRequestIdRef = useRef(0);
   const browseSectionRef = useRef(null);
+  const restoreBrowseScrollRef = useRef(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -159,9 +161,7 @@ export default function App() {
     if (shopperProfile) {
       setSelectedProduct(null);
       setScreen("browse");
-      window.requestAnimationFrame(() => {
-        browseSectionRef.current?.scrollIntoView({ block: "start" });
-      });
+      restoreBrowseScrollRef.current = true;
     }
   }
 
@@ -252,6 +252,17 @@ export default function App() {
     };
   }, [overlayOpen]);
 
+  useEffect(() => {
+    if (!restoreBrowseScrollRef.current || arProduct || screen !== "browse") {
+      return;
+    }
+
+    restoreBrowseScrollRef.current = false;
+    window.requestAnimationFrame(() => {
+      browseSectionRef.current?.scrollIntoView({ block: "start" });
+    });
+  }, [arProduct, screen]);
+
   return (
     <main className="app-shell">
       <div className="ambient ambient-a" />
@@ -322,7 +333,29 @@ export default function App() {
         onOpenAR={handleOpenAR}
       />
 
-      <ARPreview product={arProduct} onClose={handleCloseAR} />
+      <AppErrorBoundary
+        resetKey={arProduct?.id || "no-ar-product"}
+        fallback={
+          arProduct ? (
+            <section className="overlay-shell ar-shell">
+              <div className="overlay-card ar-panel">
+                <div className="ar-copy">
+                  <span className="eyebrow">Try-On Preview</span>
+                  <h2>Preview unavailable</h2>
+                  <p>The preview closed unexpectedly. You can return to the catalog and try again.</p>
+                </div>
+                <div className="tryon-actions">
+                  <button type="button" className="primary-button" onClick={handleCloseAR}>
+                    Back to catalog
+                  </button>
+                </div>
+              </div>
+            </section>
+          ) : null
+        }
+      >
+        <ARPreview product={arProduct} onClose={handleCloseAR} />
+      </AppErrorBoundary>
     </main>
   );
 }

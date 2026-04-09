@@ -14,7 +14,7 @@ Guidance for agents working in `ebo_personalize_hackathon`.
 - Frontend: React 18, Vite
 - Backend: Express 4, Node.js ESM
 - 3D/visuals: Three.js
-- Data adapters: Metabase, spreadsheet import via `xlsx`
+- Data adapters: local SQLite catalog, Metabase, Excel import via `xlsx`
 - Image generation: OpenRouter image-capable models
 
 ## Runbook
@@ -24,6 +24,7 @@ Guidance for agents working in `ebo_personalize_hackathon`.
 - Frontend only: `npm run dev:client`
 - Backend only: `npm run dev:server`
 - Production-style backend start: `npm start`
+- Bootstrap local catalog DB: `npm run db:bootstrap -- /absolute/path/to/Export.xlsx`
 - Frontend build: `npm run build`
 - Frontend preview: `npm run preview`
 
@@ -43,7 +44,9 @@ Default local ports:
 - `src/utils/helpers.js`: shared formatting and utility helpers
 - `src/utils/mockData.js`: local demo members, products, stores, and inventory
 - `server/index.js`: Express API entrypoint
-- `server/catalogService.js`: spreadsheet catalog loading and normalization
+- `server/catalogDb.js`: local SQLite catalog reads used by the API
+- `server/catalogImport.js`: Excel-to-catalog normalization used during DB bootstrap
+- `scripts/bootstrapCatalogDb.js`: imports the Shopify export into `data/catalog.sqlite`
 - `server/metabase*.js`: server-side Metabase config and queries
 - `server/openrouter*.js`: try-on generation config and API calls
 
@@ -61,7 +64,7 @@ Default local ports:
 
 For products:
 
-1. Spreadsheet export, if the configured XLSX file exists and returns supported products.
+1. Local SQLite catalog DB, if `data/catalog.sqlite` exists and contains products.
 2. Metabase, if configured and returns data.
 3. Local mock data from `src/utils/mockData.js`.
 
@@ -79,7 +82,8 @@ For try-on:
 
 - `vite.config.js` proxies `/api` requests to the local Express server.
 - `server/index.js` imports constants and helpers directly from `src/`, so shared utilities affect both frontend and backend behavior.
-- `server/catalogService.js` defaults to a machine-specific spreadsheet path via `PRODUCT_EXPORT_PATH` or a hard-coded local file path.
+- `server/catalogDb.js` defaults to `data/catalog.sqlite` and can be overridden with `CATALOG_DB_PATH`.
+- `scripts/bootstrapCatalogDb.js` imports from `PRODUCT_EXPORT_PATH`, a CLI path argument, or a default Downloads export path.
 - `README.md` currently contains an absolute path in the Metabase example link; keep docs portable when updating them.
 - `server/metabaseConfig.js` currently ships with real-looking defaults. Treat config changes here carefully and prefer environment variables over additional hard-coded values.
 
@@ -90,6 +94,7 @@ The backend uses `node --env-file-if-exists=.env`, so a local `.env` is the expe
 Useful environment variables:
 
 - `PORT`
+- `CATALOG_DB_PATH`
 - `PRODUCT_EXPORT_PATH`
 - `METABASE_BASE_URL`
 - `METABASE_API_KEY`
@@ -130,9 +135,9 @@ Minimum verification after changes:
 
 - Member login uses a static OTP of `0000`; this is intentional for the demo.
 - Product category naming is not perfectly normalized across mock data and scoring logic, so be careful when tightening matching rules.
-- Spreadsheet parsing depends on a `Products` sheet and specific Shopify-like column names.
+- Excel import depends on a `Products` sheet and specific Shopify-like column names during DB bootstrap.
 - Some defaults are machine-specific, so avoid assuming paths outside the repo will exist on another machine.
-- The backend returns inventory synthesized from either spreadsheet variants or local mock inventory; nearby store logic only exists in the mock path.
+- The backend returns inventory synthesized from either catalog DB variants or local mock inventory; nearby store logic only exists in the mock path.
 
 ## Branching
 
