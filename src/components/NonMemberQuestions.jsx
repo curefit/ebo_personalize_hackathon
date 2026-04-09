@@ -1,29 +1,44 @@
-import { useMemo, useState } from "react";
-import { NON_MEMBER_QUESTIONS } from "../utils/constants";
+import { useState } from "react";
+import { GUEST_QUESTION_BANK } from "../utils/constants";
 
 export default function NonMemberQuestions({ onBack, onComplete }) {
   const [step, setStep] = useState(0);
   const [answers, setAnswers] = useState({});
+  const totalSteps = GUEST_QUESTION_BANK.length;
+  const question = GUEST_QUESTION_BANK[step] || null;
+  const progress = totalSteps > 0 ? `${Math.min(step + 1, totalSteps)}/${totalSteps}` : "0/0";
+  const selectedValue = question ? answers[question.id] || "" : "";
 
-  const question = NON_MEMBER_QUESTIONS[step];
-  const progress = useMemo(() => `${step + 1}/${NON_MEMBER_QUESTIONS.length}`, [step]);
-  const selectedValue = answers[question.id];
-
-  function handleOptionClick(option) {
-    setAnswers((current) => ({ ...current, [question.id]: option }));
-  }
-
-  function handleNext() {
-    if (!selectedValue) {
+  function updateAnswer(value) {
+    if (!question) {
       return;
     }
 
-    if (step === NON_MEMBER_QUESTIONS.length - 1) {
+    setAnswers((current) => ({ ...current, [question.id]: value }));
+  }
+
+  function handleNext() {
+    if (!question) {
       onComplete(answers);
       return;
     }
 
-    setStep((current) => current + 1);
+    if (!String(selectedValue).trim()) {
+      return;
+    }
+
+    const nextAnswers = {
+      ...answers,
+      [question.id]: selectedValue,
+    };
+
+    if (step >= totalSteps - 1) {
+      onComplete(nextAnswers);
+      return;
+    }
+
+    setAnswers(nextAnswers);
+    setStep((current) => Math.min(current + 1, totalSteps - 1));
   }
 
   function handleBack() {
@@ -32,40 +47,49 @@ export default function NonMemberQuestions({ onBack, onComplete }) {
       return;
     }
 
-    setStep((current) => current - 1);
+    setStep((current) => Math.max(current - 1, 0));
+  }
+
+  if (!question) {
+    return null;
   }
 
   return (
-    <section className="panel questions-panel">
-      <div className="question-progress">
-        <span className="eyebrow">Guest Discovery</span>
+    <section className="brief-shell">
+      <div className="brief-header">
+        <span className="eyebrow">Guest brief</span>
         <span className="progress-pill">{progress}</span>
       </div>
 
-      <div className="panel-copy">
+      <div className="brief-copy">
         <h2>{question.title}</h2>
         <p>{question.subtitle}</p>
       </div>
 
-      <div className="option-grid">
+      <div className="choice-grid">
         {question.options.map((option) => (
           <button
             key={option}
             type="button"
-            className={`option-card ${selectedValue === option ? "is-selected" : ""}`}
-            onClick={() => handleOptionClick(option)}
+            className={`choice-tile ${selectedValue === option ? "is-selected" : ""}`}
+            onClick={() => updateAnswer(option)}
           >
-            {option}
+            <span>{option}</span>
           </button>
         ))}
       </div>
 
-      <div className="form-actions">
+      <div className="brief-actions">
         <button type="button" className="ghost-button" onClick={handleBack}>
           Back
         </button>
-        <button type="button" className="primary-button" disabled={!selectedValue} onClick={handleNext}>
-          {step === NON_MEMBER_QUESTIONS.length - 1 ? "See My Picks" : "Next"}
+        <button
+          type="button"
+          className="primary-button"
+          onClick={handleNext}
+          disabled={!String(selectedValue).trim()}
+        >
+          {step >= totalSteps - 1 ? "Finish brief" : "Next"}
         </button>
       </div>
     </section>

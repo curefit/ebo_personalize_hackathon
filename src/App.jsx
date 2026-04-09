@@ -1,71 +1,311 @@
-import { Suspense, lazy, startTransition, useEffect, useMemo, useRef, useState } from "react";
-import AppErrorBoundary from "./components/AppErrorBoundary";
+import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import AdminConsole from "./components/AdminConsole";
 import ARPreview from "./components/ARPreview";
+import AppErrorBoundary from "./components/AppErrorBoundary";
 import MemberLogin from "./components/MemberLogin";
 import NonMemberQuestions from "./components/NonMemberQuestions";
 import ProductDetails from "./components/ProductDetails";
 import ProductGrid from "./components/ProductGrid";
 import ToyMascotStudio from "./components/ToyMascotStudio";
-import { fetchProducts, loginMember } from "./services/apiClient";
-import { getRecommendations } from "./services/recommendationEngine";
-import { APP_COPY, MEMBER_OPTIONS } from "./utils/constants";
+import { fetchExperience, fetchProducts, fetchRecommendations, loginMember } from "./services/apiClient";
+import {
+  ACTIVITY_OPTIONS,
+  APP_COPY,
+  BUDGET_OPTIONS,
+  FIT_OPTIONS,
+  GENDER_OPTIONS,
+  MATERIAL_OPTIONS,
+  MEMBER_OPTIONS,
+  SESSION_GOAL_OPTIONS,
+} from "./utils/constants";
+import { matchesIntentFilters, parseShopperIntent, scoreProductIntentMatch } from "./utils/queryIntent.js";
 import { buildGuestName, getInitials, normalizePhoneNumber } from "./utils/helpers";
 
-const WelcomeAnimation = lazy(() => import("./components/WelcomeAnimation"));
+function buildGuestProfile(answers) {
+  return {
+    ...answers,
+    gender: answers.gender || "Any",
+    userType: "guest",
+    name: buildGuestName(answers.activity),
+    fitness_level: "Walk-in",
+  };
+}
+
+function buildMemberProfile(member) {
+  return {
+    ...member,
+    gender: member.gender || "Any",
+    userType: "member",
+    session_goal: member.session_goal || "Train hard",
+    climate_preference: member.climate_preference || "Allweather",
+    budget_band: member.budget_band || "Balanced",
+  };
+}
+
+function buildBrowseStatusMessage({
+  recommendationsLoading,
+  catalogLoading,
+  recommendationsError,
+  catalogError,
+  recommendations,
+  catalogResults,
+}) {
+  const hasRecommendations = recommendations.length > 0;
+  const hasCatalogResults = catalogResults.length > 0;
+
+  if (recommendationsLoading && catalogLoading) {
+    return "Refreshing the rack and the recommendations...";
+  }
+
+  if (recommendationsLoading) {
+    return "Refreshing recommendations...";
+  }
+
+  if (catalogLoading) {
+    return "Filtering the rack...";
+  }
+
+  if (recommendationsError && catalogError) {
+    return hasRecommendations || hasCatalogResults
+      ? "Showing the current rack while refresh retries."
+      : "Rack refresh is paused for now.";
+  }
+
+  if (recommendationsError) {
+    return hasRecommendations ? "Showing the current rack while recommendations retry." : "Recommendations are paused for now.";
+  }
+
+  if (catalogError) {
+    return hasCatalogResults ? "Showing the last filtered rack while catalog refresh retries." : "Catalog refresh is paused for now.";
+  }
+
+  return "";
+}
+
+function matchesSearch(product, query) {
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  if (!normalizedQuery) {
+    return true;
+  }
+
+  const haystack = [
+    product?.name,
+    product?.category,
+    product?.description,
+    product?.material,
+    product?.material_tag,
+    ...(product?.colors || []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return haystack.includes(normalizedQuery);
+}
 
 export default function App() {
-  const showToyStudio = new URLSearchParams(window.location.search).get("view") === "toy";
-  const [screen, setScreen] = useState("member-check");
-  const [catalog, setCatalog] = useState([]);
-  const [catalogError, setCatalogError] = useState("");
-  const [catalogLoading, setCatalogLoading] = useState(true);
+  const view = new URLSearchParams(window.location.search).get("view");
+  const pathname = window.location.pathname.replace(/\/+$/, "") || "/";
+  const showToyStudio = view === "toy";
+  const showAdminConsole = pathname === "/admin" || view === "admin";
+  const [screen, setScreen] = useState("landing");
+  const [experience, setExperience] = useState(null);
+  const [experienceStatus, setExperienceStatus] = useState("loading");
   const [shopperProfile, setShopperProfile] = useState(null);
+  const [recommendations, setRecommendations] = useState([]);
+  const [profileSummary, setProfileSummary] = useState(null);
+  const [recommendationsLoading, setRecommendationsLoading] = useState(false);
+  const [recommendationsError, setRecommendationsError] = useState("");
+  const [catalogResults, setCatalogResults] = useState([]);
+  const [catalogTotal, setCatalogTotal] = useState(0);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
+  const [catalogSearch, setCatalogSearch] = useState("");
+  const [refineDraft, setRefineDraft] = useState("");
+  const [isListening, setIsListening] = useState(false);
+  const [voiceFeedback, setVoiceFeedback] = useState("");
+  const [voiceError, setVoiceError] = useState("");
+  const [selectedProduct, setSelectedProduct] = useState(null);
+  const [arProduct, setArProduct] = useState(null);
   const [pendingMember, setPendingMember] = useState(null);
   const [memberLookupLoading, setMemberLookupLoading] = useState(false);
   const [memberVerifyLoading, setMemberVerifyLoading] = useState(false);
   const [memberError, setMemberError] = useState("");
-  const [selectedProduct, setSelectedProduct] = useState(null);
-  const [arProduct, setArProduct] = useState(null);
   const memberLookupRequestRef = useRef(null);
   const memberLookupRequestIdRef = useRef(0);
-  const browseSectionRef = useRef(null);
-  const restoreBrowseScrollRef = useRef(false);
+  const speechRecognitionRef = useRef(null);
+  const deferredSearch = useDeferredValue(catalogSearch);
+  const deferredProfile = useDeferredValue(shopperProfile);
+  const searchIntent = useMemo(() => parseShopperIntent(deferredSearch), [deferredSearch]);
+  const shouldUseIntentDrivenCatalogSearch = useMemo(
+    () =>
+      Boolean(
+        deferredSearch.trim() &&
+          (searchIntent.gender ||
+            searchIntent.activity ||
+            searchIntent.preferred_fit ||
+            searchIntent.material_preference ||
+            searchIntent.categories?.length ||
+            searchIntent.colors?.length),
+      ),
+    [deferredSearch, searchIntent.activity, searchIntent.categories, searchIntent.colors, searchIntent.gender, searchIntent.material_preference, searchIntent.preferred_fit],
+  );
+  const speechRecognitionSupported = Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
 
   useEffect(() => {
     let isMounted = true;
+    setExperienceStatus("loading");
 
-    async function loadCatalog() {
+    async function loadExperience() {
       try {
-        const payload = await fetchProducts();
+        const payload = await fetchExperience();
         if (!isMounted) {
           return;
         }
 
-        setCatalog(payload.products || []);
+        setExperience(payload);
+        setExperienceStatus("ready");
       } catch (error) {
         if (!isMounted) {
           return;
         }
 
-        setCatalogError(error.message);
-      } finally {
-        if (isMounted) {
-          setCatalogLoading(false);
-        }
+        setExperience(null);
+        setExperienceStatus("fallback");
       }
     }
 
-    loadCatalog();
+    loadExperience();
 
     return () => {
       isMounted = false;
     };
   }, []);
 
-  const recommendations = useMemo(
-    () => getRecommendations(catalog, shopperProfile, Math.min(catalog.length, 24)),
-    [catalog, shopperProfile],
+  useEffect(() => {
+    if (screen === "browse") {
+      return;
+    }
+
+    if (speechRecognitionRef.current) {
+      speechRecognitionRef.current.onresult = null;
+      speechRecognitionRef.current.onerror = null;
+      speechRecognitionRef.current.onend = null;
+      speechRecognitionRef.current.stop();
+      speechRecognitionRef.current = null;
+    }
+
+    setIsListening(false);
+  }, [screen]);
+
+  useEffect(() => {
+    if (!deferredProfile) {
+      setRecommendations([]);
+      setProfileSummary(null);
+      return;
+    }
+
+    let isMounted = true;
+    setRecommendationsLoading(true);
+    setRecommendationsError("");
+
+    fetchRecommendations(deferredProfile, 10)
+      .then((payload) => {
+        if (!isMounted) {
+          return;
+        }
+
+        setRecommendations(payload.recommendations || []);
+        setProfileSummary(payload.profileSummary || null);
+      })
+      .catch((error) => {
+        if (!isMounted) {
+          return;
+        }
+
+        setRecommendationsError(error.message);
+      })
+      .finally(() => {
+        if (isMounted) {
+          setRecommendationsLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [deferredProfile]);
+
+  useEffect(() => {
+    setRefineDraft(shopperProfile?.style_note || "");
+  }, [shopperProfile?.style_note]);
+
+  useEffect(
+    () => () => {
+      if (speechRecognitionRef.current) {
+        speechRecognitionRef.current.onresult = null;
+        speechRecognitionRef.current.onerror = null;
+        speechRecognitionRef.current.onend = null;
+        speechRecognitionRef.current.stop();
+        speechRecognitionRef.current = null;
+      }
+    },
+    [],
   );
+
+  useEffect(() => {
+    if (screen !== "browse") {
+      return;
+    }
+
+    let isMounted = true;
+    setCatalogLoading(true);
+    setCatalogError("");
+
+    fetchProducts({
+      limit: deferredSearch.trim() ? 48 : 12,
+      search: shouldUseIntentDrivenCatalogSearch ? "" : deferredSearch,
+      activity: searchIntent.activity || (deferredSearch.trim() ? "" : shopperProfile?.activity),
+      fit: searchIntent.preferred_fit || "",
+      material: searchIntent.material_preference || "",
+      category: searchIntent.categories?.[0] || "",
+      gender: searchIntent.gender || "",
+    })
+      .then((payload) => {
+        if (!isMounted) {
+          return;
+        }
+
+        setCatalogResults(payload.products || []);
+        setCatalogTotal(payload.total || 0);
+      })
+      .catch((error) => {
+        if (!isMounted) {
+          return;
+        }
+
+        setCatalogError(error.message);
+      })
+      .finally(() => {
+        if (isMounted) {
+          setCatalogLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [
+    deferredSearch,
+    screen,
+    searchIntent.activity,
+    searchIntent.categories,
+    searchIntent.gender,
+    searchIntent.material_preference,
+    searchIntent.preferred_fit,
+    shopperProfile?.activity,
+    shouldUseIntentDrivenCatalogSearch,
+  ]);
 
   function handleMemberOtpRequest(rawPhone) {
     const phone = normalizePhoneNumber(rawPhone);
@@ -76,14 +316,13 @@ export default function App() {
 
     memberLookupRequestIdRef.current += 1;
     const requestId = memberLookupRequestIdRef.current;
-
     setPendingMember(null);
     setMemberError("");
     setMemberLookupLoading(true);
 
     const request = loginMember(phone)
       .then((payload) => {
-        const member = { ...payload.member, userType: "member" };
+        const member = buildMemberProfile(payload.member);
         if (memberLookupRequestIdRef.current === requestId) {
           setPendingMember(member);
         }
@@ -94,6 +333,7 @@ export default function App() {
           setMemberError(error.message);
           setPendingMember(null);
         }
+
         return { ok: false, error };
       })
       .finally(() => {
@@ -104,6 +344,15 @@ export default function App() {
       });
 
     memberLookupRequestRef.current = request;
+  }
+
+  function setJourneyScreen(nextScreen) {
+    if (nextScreen !== "browse") {
+      setSelectedProduct(null);
+      setArProduct(null);
+    }
+
+    startTransition(() => setScreen(nextScreen));
   }
 
   async function handleMemberOtpVerify() {
@@ -131,19 +380,133 @@ export default function App() {
     setShopperProfile(resolvedMember);
     setPendingMember(null);
     setMemberVerifyLoading(false);
-    setScreen("welcome");
+    setJourneyScreen("browse");
   }
 
   function handleGuestComplete(answers) {
-    const shopper = {
-      ...answers,
-      name: buildGuestName(answers.activity),
-      fitness_level: "Self-selected",
-      userType: "guest",
+    setShopperProfile(buildGuestProfile(answers));
+    setJourneyScreen("browse");
+  }
+
+  function updateProfileField(field, value) {
+    setShopperProfile((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [field]: value,
+      };
+    });
+  }
+
+  function applyRefineDraft() {
+    const nextValue = refineDraft.trim();
+    setVoiceFeedback(nextValue ? `Refining for: ${nextValue}` : "");
+    setVoiceError("");
+    if (nextValue === (shopperProfile?.style_note || "")) {
+      return;
+    }
+
+    updateProfileField("style_note", nextValue);
+  }
+
+  function stopVoiceCapture() {
+    if (speechRecognitionRef.current) {
+      speechRecognitionRef.current.onresult = null;
+      speechRecognitionRef.current.onerror = null;
+      speechRecognitionRef.current.onend = null;
+      speechRecognitionRef.current.stop();
+      speechRecognitionRef.current = null;
+    }
+
+    setIsListening(false);
+  }
+
+  function toggleVoiceCapture() {
+    if (!speechRecognitionSupported) {
+      setVoiceError("Voice input is not supported in this browser.");
+      return;
+    }
+
+    if (isListening && speechRecognitionRef.current) {
+      stopVoiceCapture();
+      return;
+    }
+
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const recognition = speechRecognitionRef.current || new Recognition();
+    let latestTranscript = "";
+
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    recognition.lang = "en-IN";
+    setVoiceError("");
+    setVoiceFeedback("Listening for a product brief...");
+
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results)
+        .map((result) => result[0]?.transcript || "")
+        .join(" ")
+        .trim();
+
+      if (transcript) {
+        latestTranscript = transcript;
+        setRefineDraft(transcript);
+        setVoiceFeedback(`Heard: ${transcript}`);
+      }
     };
 
-    setShopperProfile(shopper);
-    setScreen("welcome");
+    recognition.onerror = (event) => {
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        setVoiceError("Microphone access is blocked. Allow mic access and try again.");
+      } else if (event.error === "no-speech") {
+        setVoiceError("I didn't catch that. Try speaking again.");
+      } else {
+        setVoiceError("Voice capture failed. Try again or type the brief.");
+      }
+      setVoiceFeedback("");
+      setIsListening(false);
+    };
+
+    recognition.onend = () => {
+      if (latestTranscript) {
+        updateProfileField("style_note", latestTranscript);
+        setVoiceFeedback(`Applied voice brief: ${latestTranscript}`);
+      } else if (!voiceError) {
+        setVoiceFeedback("");
+      }
+      setIsListening(false);
+    };
+
+    speechRecognitionRef.current = recognition;
+    setIsListening(true);
+    recognition.start();
+  }
+
+  function resetJourney() {
+    memberLookupRequestIdRef.current += 1;
+    memberLookupRequestRef.current = null;
+    stopVoiceCapture();
+    setShopperProfile(null);
+    setPendingMember(null);
+    setMemberError("");
+    setRecommendations([]);
+    setRecommendationsLoading(false);
+    setRecommendationsError("");
+    setProfileSummary(null);
+    setCatalogResults([]);
+    setCatalogTotal(0);
+    setCatalogSearch("");
+    setCatalogLoading(false);
+    setCatalogError("");
+    setSelectedProduct(null);
+    setArProduct(null);
+    setMemberLookupLoading(false);
+    setMemberVerifyLoading(false);
+    setJourneyScreen("landing");
   }
 
   function handleOpenDetails(product) {
@@ -152,201 +515,381 @@ export default function App() {
 
   function handleOpenAR(product) {
     setSelectedProduct(null);
-    setScreen("browse");
     setArProduct(product);
   }
 
-  function handleCloseAR() {
-    setArProduct(null);
-    if (shopperProfile) {
-      setSelectedProduct(null);
-      setScreen("browse");
-      restoreBrowseScrollRef.current = true;
-    }
-  }
+  const heroProducts = experience?.featuredProducts || [];
+  const leadProduct = recommendations[0] || heroProducts[0] || null;
+  const activityChoices = useMemo(
+    () => [...new Set([shopperProfile?.activity, ...(experience?.activities || []), ...ACTIVITY_OPTIONS].filter(Boolean))],
+    [experience?.activities, shopperProfile?.activity],
+  );
+  const visibleRecommendations = useMemo(
+    () =>
+      recommendations.filter((product) => {
+        if (!matchesIntentFilters(product, searchIntent)) {
+          return false;
+        }
 
-  function renderOnboarding() {
-    if (screen === "member-login") {
-      return (
-        <MemberLogin
-          onBack={() => {
-            memberLookupRequestIdRef.current += 1;
-            memberLookupRequestRef.current = null;
-            setPendingMember(null);
-            setMemberError("");
-            setMemberLookupLoading(false);
-            setMemberVerifyLoading(false);
-            setScreen("member-check");
-          }}
-          onRequestOtp={handleMemberOtpRequest}
-          onVerifyOtp={handleMemberOtpVerify}
-          requestLoading={memberLookupLoading}
-          verifyLoading={memberVerifyLoading}
-          error={memberError}
-        />
-      );
+        return matchesSearch(product, deferredSearch) || scoreProductIntentMatch(product, searchIntent, deferredSearch) > 0;
+      }),
+    [deferredSearch, recommendations, searchIntent],
+  );
+  const visibleCatalogResults = useMemo(() => {
+    if (!deferredSearch.trim()) {
+      return catalogResults;
     }
 
-    if (screen === "non-member") {
-      return <NonMemberQuestions onBack={() => setScreen("member-check")} onComplete={handleGuestComplete} />;
-    }
-
-    return (
-      <section className="panel landing-panel">
-        <div className="landing-copy">
-          <h1>{APP_COPY.heroTitle}</h1>
-          <p>{APP_COPY.heroSubtitle}</p>
-        </div>
-
-        <div className="landing-actions">
-          <h2>How would you like to start?</h2>
-          <div className="member-choice-grid">
-            {MEMBER_OPTIONS.map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                className="member-choice-card"
-                onClick={() => setScreen(option.value === "member" ? "member-login" : "non-member")}
-              >
-                <span>{option.label}</span>
-                <small>{option.value === "member" ? "Use your phone number" : "Answer 3 quick questions"}</small>
-              </button>
-            ))}
-          </div>
-        </div>
-      </section>
-    );
-  }
+    return [...catalogResults]
+      .map((product) => ({
+        product,
+        matchScore: scoreProductIntentMatch(product, searchIntent, deferredSearch),
+      }))
+      .filter(({ product, matchScore }) => matchesSearch(product, deferredSearch) || matchScore > 0)
+      .sort((left, right) => right.matchScore - left.matchScore)
+      .map(({ product }) => product);
+  }, [catalogResults, deferredSearch, searchIntent]);
+  const isLandingScreen = screen === "landing";
+  const isMemberScreen = screen === "member";
+  const isGuestScreen = screen === "guest";
+  const isBrowseScreen = screen === "browse";
+  const tryOnLive = experience?.tryOn === "openrouter";
+  const browseStatusMessage = useMemo(
+    () =>
+      buildBrowseStatusMessage({
+        recommendationsLoading,
+        catalogLoading,
+        recommendationsError,
+        catalogError,
+        recommendations,
+        catalogResults,
+      }),
+    [catalogError, catalogLoading, catalogResults, recommendations, recommendationsError, recommendationsLoading],
+  );
 
   if (showToyStudio) {
     return <ToyMascotStudio />;
   }
 
-  const hideTopbar = screen === "member-check" || screen === "member-login" || screen === "non-member";
-  const showBrowse =
-    Boolean(shopperProfile) &&
-    screen !== "member-check" &&
-    screen !== "member-login" &&
-    screen !== "non-member" &&
-    screen !== "welcome";
-  const overlayOpen = Boolean(selectedProduct || arProduct);
-
-  useEffect(() => {
-    if (!overlayOpen) {
-      return undefined;
-    }
-
-    const body = document.body;
-    const html = document.documentElement;
-    const previous = {
-      htmlOverflow: html.style.overflow,
-      bodyOverflow: body.style.overflow,
-    };
-
-    html.style.overflow = "hidden";
-    body.style.overflow = "hidden";
-
-    return () => {
-      html.style.overflow = previous.htmlOverflow;
-      body.style.overflow = previous.bodyOverflow;
-    };
-  }, [overlayOpen]);
-
-  useEffect(() => {
-    if (!restoreBrowseScrollRef.current || arProduct || screen !== "browse") {
-      return;
-    }
-
-    restoreBrowseScrollRef.current = false;
-    window.requestAnimationFrame(() => {
-      browseSectionRef.current?.scrollIntoView({ block: "start" });
-    });
-  }, [arProduct, screen]);
+  if (showAdminConsole) {
+    return <AdminConsole />;
+  }
 
   return (
     <main className="app-shell">
-      <div className="ambient ambient-a" />
-      <div className="ambient ambient-b" />
+      <div className="hero-noise hero-noise-a" />
+      <div className="hero-noise hero-noise-b" />
 
-      {!hideTopbar ? (
-        <header className="topbar">
-          <div className="brand-lockup">
-            <div className="brand-mark">{getInitials(shopperProfile?.name || "EBO")}</div>
-            <div className="brand-copy">
-              <strong>{shopperProfile?.name || "EBO Smart Kiosk"}</strong>
+      <header className="site-header">
+        <div className="brand-lockup">
+          <div className="brand-mark">{getInitials(shopperProfile?.name || APP_COPY.brand)}</div>
+          <div className="brand-copy">
+            <strong>{APP_COPY.brand} Personalize</strong>
+            <span>{experience?.currentStore?.store_name || "In-store styling console"}</span>
+          </div>
+        </div>
+
+        <div className="header-meta">
+          {experienceStatus === "loading" ? <span className="mini-pill">Loading brief</span> : null}
+          {experienceStatus === "fallback" ? <span className="mini-pill">Using fallback data</span> : null}
+          {experience ? <span className="mini-pill">{experience.mode === "catalog-db" ? "Live catalog" : "Store brief"}</span> : null}
+          {tryOnLive ? <span className="mini-pill">Try-on live</span> : null}
+        </div>
+      </header>
+
+      {!isBrowseScreen ? (
+        <section className="onboarding-shell">
+          <div className="onboarding-hero">
+            <div className="landing-copy">
+              <span className="eyebrow">{APP_COPY.heroEyebrow}</span>
+              <h1>{APP_COPY.heroTitle}</h1>
+              <p>{APP_COPY.heroSubtitle}</p>
+
+              <div className="hero-metrics">
+                <div>
+                  <strong>{experience?.totalProducts || "..."}</strong>
+                  <span>products in the current rack</span>
+                </div>
+                <div>
+                  <strong>{experience?.activities?.length || "..."}</strong>
+                  <span>activity lenses ready</span>
+                </div>
+              </div>
+
+            </div>
+
+            <div className="hero-visual">
+              <div className="hero-product-stage">
+                {heroProducts.slice(0, 3).map((product, index) => (
+                  <figure key={product.id} className={`hero-product hero-product-${index + 1}`}>
+                    <img src={product.image_url} alt={product.name} />
+                    <figcaption>
+                      <span>{product.category}</span>
+                      <strong>{product.name}</strong>
+                    </figcaption>
+                  </figure>
+                ))}
+              </div>
             </div>
           </div>
-        </header>
-      ) : null}
 
-      {catalogLoading && !catalog.length ? (
-        <section className="panel loading-panel">
-          <h2>Loading catalog...</h2>
-          <p>Preparing personalized picks.</p>
-        </section>
-      ) : null}
+          <div className="onboarding-flow">
+            <div className="launch-options">
+              {MEMBER_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={`launch-option ${screen === option.value ? "is-active" : ""}`}
+                  onClick={() => setJourneyScreen(option.value)}
+                >
+                  <strong>{option.label}</strong>
+                  <span>{option.description}</span>
+                </button>
+              ))}
+            </div>
 
-      {!catalogLoading && !catalog.length ? (
-        <section className="panel loading-panel">
-          <h2>Catalog unavailable</h2>
-          <p>{catalogError || "No products were returned from the API."}</p>
-        </section>
-      ) : null}
+            {isLandingScreen ? (
+              <section className="flow-placeholder">
+                <span className="eyebrow">Guided flow</span>
+                <h2>Select member or guest to continue.</h2>
+                <p>The next panel opens here instantly so the associate can proceed without scrolling.</p>
+              </section>
+            ) : null}
 
-      {!catalogLoading && catalog.length ? (
-        <>
-          {(screen === "member-check" || screen === "member-login" || screen === "non-member") && renderOnboarding()}
-
-          {screen === "welcome" && shopperProfile ? (
-            <Suspense
-              fallback={
-                <section className="panel loading-panel">
-                  <h2>Loading welcome...</h2>
-                  <p>Preparing your recommendations.</p>
-                </section>
-              }
-            >
-              <WelcomeAnimation
-                shopperName={shopperProfile.name}
-                shopperActivity={shopperProfile.activity}
-                onComplete={() => startTransition(() => setScreen("browse"))}
+            {isMemberScreen ? (
+              <MemberLogin
+                onBack={() => setJourneyScreen("landing")}
+                onRequestOtp={handleMemberOtpRequest}
+                onVerifyOtp={handleMemberOtpVerify}
+                requestLoading={memberLookupLoading}
+                verifyLoading={memberVerifyLoading}
+                error={memberError}
               />
-            </Suspense>
-          ) : null}
+            ) : null}
 
-          {showBrowse ? (
-            <div ref={browseSectionRef}>
+            {isGuestScreen ? (
+              <NonMemberQuestions onBack={() => setJourneyScreen("landing")} onComplete={handleGuestComplete} />
+            ) : null}
+          </div>
+        </section>
+      ) : (
+        <section className="workspace-shell">
+          <aside className="workspace-sidebar">
+            <div className="workspace-panel profile-panel">
+              <span className="eyebrow">Live brief</span>
+              <h2>{profileSummary?.headline || `${shopperProfile?.name}'s edit`}</h2>
+              <p>{profileSummary?.subline || "Refine the signals and re-rank the rack instantly."}</p>
+
+              <div className="profile-edit-grid">
+                <label className="field">
+                  <span>Gender</span>
+                  <select value={shopperProfile?.gender || "Any"} onChange={(event) => updateProfileField("gender", event.target.value)}>
+                    {GENDER_OPTIONS.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="field">
+                  <span>Activity</span>
+                  <select value={shopperProfile?.activity || ""} onChange={(event) => updateProfileField("activity", event.target.value)}>
+                    {activityChoices.map((activity) => (
+                      <option key={activity} value={activity}>
+                        {activity}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="field">
+                  <span>Fit</span>
+                  <select
+                    value={shopperProfile?.preferred_fit || ""}
+                    onChange={(event) => updateProfileField("preferred_fit", event.target.value)}
+                  >
+                    {FIT_OPTIONS.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="field">
+                  <span>Fabric</span>
+                  <select
+                    value={shopperProfile?.material_preference || ""}
+                    onChange={(event) => updateProfileField("material_preference", event.target.value)}
+                  >
+                    {MATERIAL_OPTIONS.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="field">
+                  <span>Goal</span>
+                  <select value={shopperProfile?.session_goal || ""} onChange={(event) => updateProfileField("session_goal", event.target.value)}>
+                    {SESSION_GOAL_OPTIONS.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="field">
+                  <span>Budget</span>
+                  <select value={shopperProfile?.budget_band || ""} onChange={(event) => updateProfileField("budget_band", event.target.value)}>
+                    {BUDGET_OPTIONS.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="brief-actions">
+                <button type="button" className="ghost-button" onClick={resetJourney}>
+                  New shopper
+                </button>
+              </div>
+            </div>
+          </aside>
+
+          <div className="workspace-main">
+            <section className="workspace-top">
+              <section className="workspace-summary">
+                <div className="summary-copy">
+                  <span className="eyebrow">{APP_COPY.browseTitle}</span>
+                  <h1>{profileSummary?.headline || "Rack ready"}</h1>
+                  <p>{profileSummary?.subline || APP_COPY.browseSubtitle}</p>
+                </div>
+
+                {leadProduct ? (
+                  <button type="button" className="summary-product" onClick={() => setSelectedProduct(leadProduct)}>
+                    <img src={leadProduct.image_url} alt={leadProduct.name} />
+                    <span className="summary-product-copy">
+                      <strong>{leadProduct.name}</strong>
+                      <small>{leadProduct.recommendationReason || "Current strongest match"}</small>
+                    </span>
+                  </button>
+                ) : (
+                  <div className="summary-placeholder">
+                    <strong>Ranking the first set</strong>
+                    <span>The rack will settle once the active brief finishes loading.</span>
+                  </div>
+                )}
+              </section>
+
+              <div className="refine-row">
+                <label className="search-field">
+                  <span>Search catalog</span>
+                  <input
+                    type="search"
+                    value={catalogSearch}
+                    placeholder="Search by name, fabric, or use case"
+                    onChange={(event) => setCatalogSearch(event.target.value)}
+                  />
+                </label>
+
+                <div className="refine-composer">
+                  <div className="search-field voice-search-field">
+                    <span>Refine by text or voice</span>
+                    <input
+                      type="text"
+                      value={refineDraft}
+                      placeholder="e.g. dark breathable tees"
+                      onChange={(event) => setRefineDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          applyRefineDraft();
+                        }
+                      }}
+                    />
+                    {isListening ? (
+                      <div className="voice-indicator" role="status" aria-live="polite">
+                        <span className="voice-indicator-copy">Listening now. Speak your product brief, then tap stop.</span>
+                        <span className="voice-wave" aria-hidden="true">
+                          <i />
+                          <i />
+                          <i />
+                          <i />
+                        </span>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="refine-actions">
+                    <button
+                      type="button"
+                      className={`ghost-button ${isListening ? "is-listening" : ""}`}
+                      onClick={toggleVoiceCapture}
+                      disabled={!speechRecognitionSupported}
+                      aria-pressed={isListening}
+                    >
+                      {isListening ? "Stop listening" : "Voice"}
+                    </button>
+                    <button type="button" className="primary-button" onClick={applyRefineDraft}>
+                      Apply
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {browseStatusMessage ? <p className="loading-copy">{browseStatusMessage}</p> : null}
+              {voiceFeedback ? <p className="loading-copy">{voiceFeedback}</p> : null}
+              {voiceError ? <p className="form-error">{voiceError}</p> : null}
+            </section>
+
+            <section className="workspace-list-scroll">
               <ProductGrid
-                recommendations={recommendations}
-                shopperProfile={shopperProfile}
+                className="catalog-section--compact"
+                title="Best picks for this shopper"
+                subtitle={
+                  deferredSearch
+                    ? `Showing ${visibleRecommendations.length} recommendation${visibleRecommendations.length === 1 ? "" : "s"} for "${deferredSearch}".`
+                    : "These are the strongest immediate options based on the active brief."
+                }
+                products={visibleRecommendations}
                 onOpenDetails={handleOpenDetails}
                 onOpenAR={handleOpenAR}
+                emptyCopy="No strong matches yet. Try a small refinement."
               />
-            </div>
-          ) : null}
-        </>
-      ) : null}
 
-      <ProductDetails
-        product={selectedProduct}
-        onBack={() => setSelectedProduct(null)}
-        onOpenAR={handleOpenAR}
-      />
+              <ProductGrid
+                className="catalog-section--compact"
+                title={`Showing ${visibleCatalogResults.length} of ${catalogTotal || catalogResults.length}`}
+                subtitle="Use this rail for alternatives, safer options, or a second opinion."
+                products={visibleCatalogResults}
+                onOpenDetails={handleOpenDetails}
+                onOpenAR={handleOpenAR}
+                emptyCopy="No catalog results matched that search."
+              />
+            </section>
+          </div>
+        </section>
+      )}
+
+      <ProductDetails product={selectedProduct} onBack={() => setSelectedProduct(null)} onOpenAR={handleOpenAR} />
 
       <AppErrorBoundary
         resetKey={arProduct?.id || "no-ar-product"}
         fallback={
           arProduct ? (
-            <section className="overlay-shell ar-shell">
-              <div className="overlay-card ar-panel">
-                <div className="ar-copy">
-                  <span className="eyebrow">Try-On Preview</span>
-                  <h2>Preview unavailable</h2>
-                  <p>The preview closed unexpectedly. You can return to the catalog and try again.</p>
-                </div>
-                <div className="tryon-actions">
-                  <button type="button" className="primary-button" onClick={handleCloseAR}>
-                    Back to catalog
+            <section className="overlay-shell">
+              <div className="overlay-card detail-panel">
+                <h2>Preview unavailable</h2>
+                <p>The try-on panel closed unexpectedly. Return to the rack and try again.</p>
+                <div className="detail-actions">
+                  <button type="button" className="primary-button" onClick={() => setArProduct(null)}>
+                    Back to rack
                   </button>
                 </div>
               </div>
@@ -354,7 +897,7 @@ export default function App() {
           ) : null
         }
       >
-        <ARPreview product={arProduct} onClose={handleCloseAR} />
+        <ARPreview product={arProduct} onClose={() => setArProduct(null)} />
       </AppErrorBoundary>
     </main>
   );

@@ -1,6 +1,11 @@
 import cors from "cors";
 import express from "express";
-import { getCatalogProduct, getCatalogProducts, hasCatalogDatabase } from "./catalogDb.js";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { getAdminUsersPreview, loginAdmin, requireAdmin } from "./adminAuth.js";
+import { getBackOfficeSnapshot, runShopifySync, saveShopifySettings } from "./catalogSyncService.js";
+import { countCatalogProducts, getCatalogProduct, getCatalogProducts, hasCatalogDatabase } from "./catalogDb.js";
 import {
   fetchCultAppMemberByPhone,
   fetchInventoryFromMetabase,
@@ -10,12 +15,17 @@ import {
 import { isMetabaseConfigured } from "./metabaseConfig.js";
 import { isOpenRouterConfigured } from "./openrouterConfig.js";
 import { generateTryOnImage } from "./openrouterService.js";
+import { getRecommendations, summarizeProfile } from "../src/services/recommendationEngine.js";
 import { CURRENT_STORE_ID, ONLINE_DELIVERY_WINDOW } from "../src/utils/constants.js";
+import { inferProductGender } from "../src/utils/queryIntent.js";
 import { getAvailabilityTone, normalizePhoneNumber } from "../src/utils/helpers.js";
 import { INVENTORY_ENTRIES, PRODUCTS, STORES } from "../src/utils/mockData.js";
 
 const app = express();
 const port = process.env.PORT || 8787;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const distPath = path.resolve(__dirname, "../dist");
 
 app.use(cors());
 app.use(express.json({ limit: "20mb" }));
@@ -93,17 +103,28 @@ function buildInventoryResponse(productId, currentStoreId = CURRENT_STORE_ID) {
   };
 }
 
+function getTotalQuantity(product) {
+  const directQuantity = Number(product?.total_inventory_qty);
+  if (Number.isFinite(directQuantity) && directQuantity >= 0) {
+    return directQuantity;
+  }
+
+  return INVENTORY_ENTRIES
+    .filter((item) => item.product_id === product.id)
+    .reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+}
+
 function enrichProduct(product, currentStoreId = CURRENT_STORE_ID) {
-  const inventory = buildInventoryResponse(product.id, currentStoreId);
-  const totalCurrentStore = inventory.currentStore.totalQuantity;
+  const totalQuantity = getTotalQuantity(product);
 
   return {
     ...product,
+    gender: product.gender || inferProductGender(product),
     availabilityLabel:
-      totalCurrentStore > 0
-        ? `${totalCurrentStore} in ${inventory.currentStore.store_name}`
+      totalQuantity > 0
+        ? `${totalQuantity} ready in store`
         : "Check nearby stores",
-    availabilityTone: getAvailabilityTone(totalCurrentStore),
+    availabilityTone: getAvailabilityTone(totalQuantity),
   };
 }
 
@@ -130,12 +151,92 @@ async function getProducts(filters = {}) {
   return PRODUCTS.filter((product) => {
     const activityMatch = !filters.activity || product.activity === filters.activity;
     const fitMatch = !filters.fit || product.fit === filters.fit;
+    const categoryMatch = !filters.category || String(product.category).toLowerCase() === String(filters.category).toLowerCase();
     const materialMatch =
       !filters.material ||
       `${product.material} ${product.material_tag}`.toLowerCase().includes(String(filters.material).toLowerCase());
+    const genderMatch =
+      !filters.gender ||
+      filters.gender === "Any" ||
+      inferProductGender(product) === filters.gender ||
+      inferProductGender(product) === "Unisex";
+    const searchMatch =
+      !filters.search ||
+      `${product.name} ${product.description} ${product.material} ${product.material_tag}`
+        .toLowerCase()
+        .includes(String(filters.search).toLowerCase());
 
-    return activityMatch && fitMatch && materialMatch;
-  }).map((product) => enrichProduct(product, filters.currentStoreId));
+    return activityMatch && fitMatch && categoryMatch && materialMatch && genderMatch && searchMatch;
+  })
+    .slice(Number(filters.offset || 0), Number(filters.offset || 0) + Number(filters.limit || PRODUCTS.length))
+    .map((product) => enrichProduct(product, filters.currentStoreId));
+}
+
+async function getProductCount(filters = {}) {
+  if (hasCatalogDatabase()) {
+    return countCatalogProducts(filters);
+  }
+
+  return PRODUCTS.filter((product) => {
+    const activityMatch = !filters.activity || product.activity === filters.activity;
+    const fitMatch = !filters.fit || product.fit === filters.fit;
+    const categoryMatch = !filters.category || String(product.category).toLowerCase() === String(filters.category).toLowerCase();
+    const materialMatch =
+      !filters.material ||
+      `${product.material} ${product.material_tag}`.toLowerCase().includes(String(filters.material).toLowerCase());
+    const genderMatch =
+      !filters.gender ||
+      filters.gender === "Any" ||
+      inferProductGender(product) === filters.gender ||
+      inferProductGender(product) === "Unisex";
+    const searchMatch =
+      !filters.search ||
+      `${product.name} ${product.description} ${product.material} ${product.material_tag}`
+        .toLowerCase()
+        .includes(String(filters.search).toLowerCase());
+
+    return activityMatch && fitMatch && categoryMatch && materialMatch && genderMatch && searchMatch;
+  }).length;
+}
+
+async function buildExperiencePayload() {
+  const featuredProducts = await getProducts({ currentStoreId: CURRENT_STORE_ID, limit: 6 });
+  const totalProducts = await getProductCount({});
+  const activities = [...new Set(featuredProducts.map((product) => product.activity).filter(Boolean))];
+
+  return {
+    mode: hasCatalogDatabase() ? "catalog-db" : isMetabaseConfigured() ? "metabase" : "mock",
+    tryOn: isOpenRouterConfigured() ? "openrouter" : "disabled",
+    totalProducts,
+    featuredProducts,
+    activities,
+    currentStore: STORES.find((store) => store.store_id === CURRENT_STORE_ID) || {
+      store_id: CURRENT_STORE_ID,
+      store_name: "EBO - Current Store",
+    },
+  };
+}
+
+async function buildRecommendationPayload(profile, limit = 10) {
+  const candidateProducts = await getProducts({
+    currentStoreId: CURRENT_STORE_ID,
+    activity: profile?.activity,
+    fit: profile?.preferred_fit,
+    material: profile?.material_preference,
+    gender: profile?.gender,
+    limit: 160,
+  });
+
+  const widenedCandidates = candidateProducts.length >= Math.max(limit, 18)
+    ? candidateProducts
+    : await getProducts({ currentStoreId: CURRENT_STORE_ID, limit: 220 });
+
+  const recommendations = getRecommendations(widenedCandidates, profile, limit);
+
+  return {
+    profileSummary: summarizeProfile(profile),
+    recommendations,
+  };
 }
 
 async function getMember(phone) {
@@ -154,6 +255,7 @@ async function getMember(phone) {
           fitness_level: "Member",
           preferred_fit: "Regular",
           material_preference: "Moisture-wicking",
+          gender: "Any",
           metabase_phone: metabaseMember.phone,
           source: "metabase",
         };
@@ -172,6 +274,47 @@ app.get("/api/health", (_request, response) => {
     mode: hasCatalogDatabase() ? "catalog-db" : isMetabaseConfigured() ? "metabase" : "mock",
     tryOn: isOpenRouterConfigured() ? "openrouter" : "disabled",
   });
+});
+
+app.get("/api/admin/bootstrap", (_request, response) => {
+  response.json({
+    demoAccounts: getAdminUsersPreview(),
+  });
+});
+
+app.post("/api/admin/login", (request, response) => {
+  const username = String(request.body?.username || "").trim();
+  const password = String(request.body?.password || "").trim();
+  const result = loginAdmin(username, password);
+
+  if (!result) {
+    response.status(401).json({ message: "Invalid admin credentials." });
+    return;
+  }
+
+  response.json(result);
+});
+
+app.get("/api/admin/backoffice", requireAdmin, (_request, response) => {
+  response.json(getBackOfficeSnapshot());
+});
+
+app.post("/api/admin/shopify/settings", requireAdmin, (request, response) => {
+  const settings = saveShopifySettings(request.body || {});
+  response.json({ settings });
+});
+
+app.post("/api/admin/shopify/sync", requireAdmin, async (request, response) => {
+  try {
+    const payload = await runShopifySync(request.body || {});
+    response.json({ success: true, sync: payload });
+  } catch (error) {
+    response.status(400).json({ message: error.message || "Shopify sync failed." });
+  }
+});
+
+app.get("/api/experience", async (_request, response) => {
+  response.json(await buildExperiencePayload());
 });
 
 app.post("/api/member/login", async (request, response) => {
@@ -206,17 +349,39 @@ app.get("/api/member/:phone", async (request, response) => {
 });
 
 app.get("/api/products", async (request, response) => {
-  const products = await getProducts({
+  const offset = Number(request.query.offset || 0);
+  const limit = Number(request.query.limit || 24);
+  const filters = {
     activity: request.query.activity,
     fit: request.query.fit,
+    gender: request.query.gender,
+    category: request.query.category,
     material: request.query.material,
+    search: request.query.search,
+    offset,
+    limit,
     currentStoreId: request.query.currentStoreId || CURRENT_STORE_ID,
-  });
+  };
+  const [products, total] = await Promise.all([getProducts(filters), getProductCount(filters)]);
 
   response.json({
     products,
+    total,
+    hasMore: offset + products.length < total,
     source: hasCatalogDatabase() ? "catalog-db" : isMetabaseConfigured() ? "metabase-or-fallback" : "mock",
   });
+});
+
+app.post("/api/recommendations", async (request, response) => {
+  const profile = request.body?.profile;
+  const limit = Number(request.body?.limit || 10);
+
+  if (!profile) {
+    response.status(400).json({ message: "Missing shopper profile." });
+    return;
+  }
+
+  response.json(await buildRecommendationPayload(profile, limit));
 });
 
 app.get("/api/inventory/:productId", async (request, response) => {
@@ -325,6 +490,27 @@ app.post("/api/tryon", async (request, response) => {
     });
   }
 });
+
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+
+  app.get("/admin", (_request, response) => {
+    response.sendFile(path.join(distPath, "index.html"));
+  });
+
+  app.get("/admin/*", (_request, response) => {
+    response.sendFile(path.join(distPath, "index.html"));
+  });
+
+  app.get("*", (request, response, next) => {
+    if (request.path.startsWith("/api/")) {
+      next();
+      return;
+    }
+
+    response.sendFile(path.join(distPath, "index.html"));
+  });
+}
 
 app.listen(port, () => {
   console.log(`EBO smart kiosk API listening on http://localhost:${port}`);

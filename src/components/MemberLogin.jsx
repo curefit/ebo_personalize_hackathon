@@ -11,6 +11,7 @@ export default function MemberLogin({ onBack, onRequestOtp, onVerifyOtp, request
 
   function handleSubmit(event) {
     event.preventDefault();
+
     if (step === "phone") {
       if (phone.length !== 10) {
         setLocalError("Enter a valid 10-digit phone number.");
@@ -24,7 +25,7 @@ export default function MemberLogin({ onBack, onRequestOtp, onVerifyOtp, request
     }
 
     if (otp !== STATIC_OTP) {
-      setLocalError("Enter the correct 4-digit OTP.");
+      setLocalError("Use 0000 for this demo login.");
       return;
     }
 
@@ -44,20 +45,16 @@ export default function MemberLogin({ onBack, onRequestOtp, onVerifyOtp, request
   }
 
   return (
-    <section className="panel auth-panel">
-      <div className="panel-copy">
-        <span className="eyebrow">Member Login</span>
-        <h2>{step === "phone" ? "Enter your phone number." : "Enter the OTP to continue."}</h2>
-        <p>
-          {step === "phone"
-            ? "Exclusive discounts for Cult members. Login to grab them."
-            : "Use the static OTP below for the demo and continue to your picks."}
-        </p>
+    <section className="brief-shell member-shell">
+      <div className="brief-header">
+        <span className="eyebrow">Member lookup</span>
       </div>
 
-      <div className="member-login-note">
-        <strong>"Members get the best edit first."</strong>
-        <span>Login to unlock exclusive pricing and sharper recommendations.</span>
+      <div className="brief-copy">
+        <h2>{step === "phone" ? "Find the member profile." : "Verify the code."}</h2>
+        <p>
+          {step === "phone" ? "Use a phone number to load the saved profile." : "Demo OTP: `0000`."}
+        </p>
       </div>
 
       <form className="member-form" onSubmit={handleSubmit}>
@@ -79,9 +76,9 @@ export default function MemberLogin({ onBack, onRequestOtp, onVerifyOtp, request
           </label>
         ) : (
           <>
-            <div className="otp-header">
-              <span>OTP sent to {phone}</span>
-              <small>Use `0000` for this demo.</small>
+            <div className="otp-banner">
+              <strong>OTP sent to {phone}</strong>
+              <span>Use `0000`.</span>
             </div>
 
             <label className="field">
@@ -105,22 +102,19 @@ export default function MemberLogin({ onBack, onRequestOtp, onVerifyOtp, request
         {localError ? <p className="form-error">{localError}</p> : null}
         {!localError && error ? <p className="form-error">{error}</p> : null}
 
-        <div className="form-actions">
+        <div className="brief-actions">
           <button type="button" className="ghost-button" onClick={handleBack}>
             Back
           </button>
           <button
             type="submit"
             className="primary-button"
-            disabled={(step === "phone" ? requestLoading : verifyLoading) || (step === "phone" ? phone.length !== 10 : otp.length !== 4)}
+            disabled={
+              (step === "phone" ? requestLoading : verifyLoading) ||
+              (step === "phone" ? phone.length !== 10 : otp.length !== 4)
+            }
           >
-            {step === "phone"
-              ? "Send OTP"
-              : verifyLoading
-                ? "Loading profile..."
-                : requestLoading
-                  ? "Verify OTP"
-                  : "Verify OTP"}
+            {step === "phone" ? (requestLoading ? "Looking up..." : "Send code") : verifyLoading ? "Loading..." : "Verify"}
           </button>
         </div>
       </form>

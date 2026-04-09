@@ -12,40 +12,64 @@ export const CURRENT_STORE_NAME = "EBO - MG Road";
 export const ONLINE_DELIVERY_WINDOW = "2-3 days";
 
 export const MEMBER_OPTIONS = [
-  { label: "I am a Cult Member", value: "member" },
-  { label: "Continue as guest", value: "guest" },
+  {
+    label: "Member",
+    value: "member",
+    description: "Load a saved profile.",
+  },
+  {
+    label: "Guest",
+    value: "guest",
+    description: "Start a quick brief.",
+  },
 ];
 
 export const ACTIVITY_OPTIONS = ["Gym", "Running", "Yoga", "Casual", "Sports"];
+export const GENDER_OPTIONS = ["Any", "Women", "Men", "Unisex"];
 export const FIT_OPTIONS = ["Lightweight", "Regular", "Baggy"];
-export const MATERIAL_OPTIONS = ["Cotton", "Polyester", "Blend", "Moisture-wicking"];
+export const MATERIAL_OPTIONS = ["Cotton", "Polyester", "Blend", "Moisture-wicking", "Breathable"];
+export const SESSION_GOAL_OPTIONS = ["Train hard", "All day wear", "Studio ease", "Layering", "Complete look"];
+export const BUDGET_OPTIONS = ["Smart", "Balanced", "Premium"];
 export const SIZE_OPTIONS = ["XS", "S", "M", "L", "XL", "XXL"];
 
-export const NON_MEMBER_QUESTIONS = [
+export const GUEST_QUESTION_BANK = [
   {
     id: "activity",
-    title: "What's your main activity?",
-    subtitle: "We'll tailor the rack to how you move.",
+    type: "choice",
+    title: "What are they dressing for?",
+    subtitle: "Start with the main use case.",
     options: ACTIVITY_OPTIONS,
   },
   {
     id: "preferred_fit",
-    title: "Which fit feels right?",
-    subtitle: "Choose the silhouette you naturally reach for.",
+    type: "choice",
+    title: "Which fit should lead?",
+    subtitle: "Pick the silhouette they wear most.",
     options: FIT_OPTIONS,
   },
   {
     id: "material_preference",
-    title: "Pick your preferred fabric.",
-    subtitle: "We'll bias recommendations toward your comfort preference.",
+    type: "choice",
+    title: "What feel should we favor?",
+    subtitle: "Choose the fabric story that fits best.",
     options: MATERIAL_OPTIONS,
+  },
+  {
+    id: "budget_band",
+    type: "choice",
+    title: "What price band should we stay in?",
+    subtitle: "Keep the shortlist realistic.",
+    options: BUDGET_OPTIONS,
   },
 ];
 
-export const DEFAULT_GUEST_NAME = "Guest Athlete";
+export const DEFAULT_GUEST_NAME = "Walk-in Shopper";
 
 export const APP_COPY = {
-  heroTitle: "Built for the way you move",
-  heroSubtitle: "Discover the best tees for your profile and preview them instantly.",
-  browseTitle: "Recommended for your profile",
+  brand: "EBO",
+  heroTitle: "Pick the shopper. Build the edit.",
+  heroSubtitle: "Use a member profile or a quick guest brief, then refine the rack in seconds.",
+  heroEyebrow: "Store styling",
+  browseTitle: "Edit",
+  browseSubtitle: "Ranked by fit, fabric, and inventory confidence.",
 };
