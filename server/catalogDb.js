@@ -56,6 +56,7 @@ function normalizeGenderLabel(value = "") {
     content.includes("womens") ||
     content.includes("woman's") ||
     content.includes("women's") ||
+    content.includes("tregging") ||
     content.includes("sports bra") ||
     content.includes("bralette")
   ) {
@@ -78,8 +79,7 @@ function normalizeGenderLabel(value = "") {
 
 function buildGenderExpression(db) {
   const hasGenderColumn = db ? hasColumn(db, "products", "gender") : false;
-  const textParts = [
-    hasGenderColumn ? "coalesce(nullif(trim(gender), ''), '')" : "''",
+  const textPartsWithoutGender = [
     "coalesce(name, '')",
     "coalesce(category, '')",
     "coalesce(description, '')",
@@ -90,39 +90,66 @@ function buildGenderExpression(db) {
     "coalesce(vendor, '')",
     "coalesce(reason, '')",
   ];
-  const normalizedText = `lower(${textParts.join(" || ' ' || ")})`;
+  const textPartsWithGender = [
+    hasGenderColumn ? "coalesce(nullif(trim(gender), ''), '')" : "''",
+    ...textPartsWithoutGender,
+  ];
+  const normalizedTextWithoutGender = `lower(${textPartsWithoutGender.join(" || ' ' || ")})`;
+  const normalizedTextWithGender = `lower(${textPartsWithGender.join(" || ' ' || ")})`;
+  const explicitGender = hasGenderColumn ? "lower(coalesce(nullif(trim(gender), ''), ''))" : "''";
 
   return `
     case
-      when ${normalizedText} like '%unisex%'
-        or ${normalizedText} like '%all gender%'
-        or ${normalizedText} like '%all genders%'
-        or ${normalizedText} like '%gender neutral%'
-        or ${normalizedText} like '%neutral%'
-        then 'Unisex'
-      when ${normalizedText} like '%kid%'
-        or ${normalizedText} like '%child%'
-        or ${normalizedText} like '%boys%'
-        or ${normalizedText} like '%girls%'
-        or ${normalizedText} like '%junior%'
+      when ${normalizedTextWithoutGender} like '%kid%'
+        or ${normalizedTextWithoutGender} like '%child%'
+        or ${normalizedTextWithoutGender} like '%boys%'
+        or ${normalizedTextWithoutGender} like '%girls%'
+        or ${normalizedTextWithoutGender} like '%junior%'
+        or ${explicitGender} like '%kid%'
+        or ${explicitGender} like '%child%'
+        or ${explicitGender} like '%boys%'
+        or ${explicitGender} like '%girls%'
+        or ${explicitGender} like '%junior%'
         then 'Kids'
-      when ${normalizedText} like '%women%'
-        or ${normalizedText} like '%woman%'
-        or ${normalizedText} like '%women''s%'
-        or ${normalizedText} like '%woman''s%'
-        or ${normalizedText} like '%ladies%'
-        or ${normalizedText} like '%lady%'
-        or ${normalizedText} like '%female%'
-        or ${normalizedText} like '%sports bra%'
-        or ${normalizedText} like '%bralette%'
+      when ${normalizedTextWithoutGender} like '%women%'
+        or ${normalizedTextWithoutGender} like '%woman%'
+        or ${normalizedTextWithoutGender} like '%women''s%'
+        or ${normalizedTextWithoutGender} like '%woman''s%'
+        or ${normalizedTextWithoutGender} like '%ladies%'
+        or ${normalizedTextWithoutGender} like '%lady%'
+        or ${normalizedTextWithoutGender} like '%female%'
+        or ${normalizedTextWithoutGender} like '%sports bra%'
+        or ${normalizedTextWithoutGender} like '%bralette%'
+        or ${normalizedTextWithoutGender} like '%tregging%'
+        or ${normalizedTextWithoutGender} like '%tights%'
+        or ${normalizedTextWithoutGender} like '%legging%'
+        or ${normalizedTextWithoutGender} like '%leggings%'
+        or ${normalizedTextWithoutGender} like '%high waist%'
+        or ${normalizedTextWithoutGender} like '%yoga tights%'
         then 'Women'
-      when ${normalizedText} like '%men%'
-        or ${normalizedText} like '%man%'
-        or ${normalizedText} like '%men''s%'
-        or ${normalizedText} like '%man''s%'
-        or ${normalizedText} like '%male%'
-        or ${normalizedText} like '%gents%'
+      when ${normalizedTextWithoutGender} like '%men%'
+        or ${normalizedTextWithoutGender} like '%man%'
+        or ${normalizedTextWithoutGender} like '%men''s%'
+        or ${normalizedTextWithoutGender} like '%man''s%'
+        or ${normalizedTextWithoutGender} like '%male%'
+        or ${normalizedTextWithoutGender} like '%gents%'
         then 'Men'
+      when ${explicitGender} like '%women%'
+        or ${explicitGender} like '%woman%'
+        or ${explicitGender} like '%ladies%'
+        or ${explicitGender} like '%female%'
+        then 'Women'
+      when ${explicitGender} like '%men%'
+        or ${explicitGender} like '%man%'
+        or ${explicitGender} like '%male%'
+        or ${explicitGender} like '%gents%'
+        then 'Men'
+      when ${normalizedTextWithGender} like '%unisex%'
+        or ${normalizedTextWithGender} like '%all gender%'
+        or ${normalizedTextWithGender} like '%all genders%'
+        or ${normalizedTextWithGender} like '%gender neutral%'
+        or ${normalizedTextWithGender} like '%neutral%'
+        then 'Unisex'
       else 'Unisex'
     end
   `;
@@ -359,6 +386,53 @@ export function getCatalogProduct(productId) {
       ...mapProductRow(row),
       variants,
     };
+  } finally {
+    db.close();
+  }
+}
+
+export function getCatalogProductIdsBySkus(skuCodes = []) {
+  const normalizedSkus = [...new Set(
+    skuCodes
+      .map((value) => String(value || "").trim().toUpperCase())
+      .filter(Boolean),
+  )];
+
+  if (!normalizedSkus.length) {
+    return {};
+  }
+
+  const db = openDatabase();
+  if (!db) {
+    return {};
+  }
+
+  try {
+    const placeholders = normalizedSkus.map(() => "?").join(", ");
+    const rows = db
+      .prepare(`
+        select
+          upper(trim(coalesce(sku, ''))) as sku_code,
+          product_id,
+          quantity
+        from product_variants
+        where upper(trim(coalesce(sku, ''))) in (${placeholders})
+        order by quantity desc, product_id asc
+      `)
+      .all(...normalizedSkus);
+
+    const skuToProductId = {};
+    for (const row of rows) {
+      if (!row?.sku_code || !row?.product_id) {
+        continue;
+      }
+
+      if (!skuToProductId[row.sku_code]) {
+        skuToProductId[row.sku_code] = row.product_id;
+      }
+    }
+
+    return skuToProductId;
   } finally {
     db.close();
   }

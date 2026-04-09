@@ -103,6 +103,60 @@ function matchesSearch(product, query) {
   return haystack.includes(normalizedQuery);
 }
 
+function normalizeGenderValue(value = "") {
+  const normalized = String(value || "").trim().toLowerCase();
+
+  if (["men", "male", "man"].includes(normalized)) {
+    return "Men";
+  }
+
+  if (["women", "female", "woman", "lady"].includes(normalized)) {
+    return "Women";
+  }
+
+  return "Any";
+}
+
+function isGenderCompatible(product, profileGender) {
+  const preferred = normalizeGenderValue(profileGender);
+  if (preferred === "Any") {
+    return true;
+  }
+
+  const productText = `${product?.name || ""} ${product?.category || ""}`.toLowerCase();
+  if (preferred === "Men" && productText.includes("tregging")) {
+    return false;
+  }
+
+  const productGender = normalizeGenderValue(product?.gender);
+  return productGender === preferred;
+}
+
+function buildArSessionPool(activeProduct, sourceProducts = [], maxFollowUps = 5) {
+  if (!activeProduct?.id) {
+    return [];
+  }
+
+  const maxPoolSize = maxFollowUps + 1;
+  const pool = [activeProduct];
+  const seen = new Set([activeProduct.id]);
+
+  for (const candidate of sourceProducts) {
+    if (!candidate?.id || seen.has(candidate.id)) {
+      continue;
+    }
+
+    seen.add(candidate.id);
+    pool.push(candidate);
+
+    if (pool.length >= maxPoolSize) {
+      break;
+    }
+  }
+
+  return pool;
+}
+
 export default function App() {
   const view = new URLSearchParams(window.location.search).get("view");
   const pathname = window.location.pathname.replace(/\/+$/, "") || "/";
@@ -127,6 +181,10 @@ export default function App() {
   const [voiceError, setVoiceError] = useState("");
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [arProduct, setArProduct] = useState(null);
+  const [arOpenNonce, setArOpenNonce] = useState(0);
+  const [previewCacheByProductId, setPreviewCacheByProductId] = useState({});
+  const [activeTryOnPoster, setActiveTryOnPoster] = useState("");
+  const [arSessionPool, setArSessionPool] = useState([]);
   const [pendingMember, setPendingMember] = useState(null);
   const [memberLookupLoading, setMemberLookupLoading] = useState(false);
   const [memberVerifyLoading, setMemberVerifyLoading] = useState(false);
@@ -269,7 +327,7 @@ export default function App() {
       fit: searchIntent.preferred_fit || "",
       material: searchIntent.material_preference || "",
       category: searchIntent.categories?.[0] || "",
-      gender: searchIntent.gender || "",
+      gender: searchIntent.gender || shopperProfile?.gender || "",
     })
       .then((payload) => {
         if (!isMounted) {
@@ -304,6 +362,7 @@ export default function App() {
     searchIntent.material_preference,
     searchIntent.preferred_fit,
     shopperProfile?.activity,
+    shopperProfile?.gender,
     shouldUseIntentDrivenCatalogSearch,
   ]);
 
@@ -350,6 +409,9 @@ export default function App() {
     if (nextScreen !== "browse") {
       setSelectedProduct(null);
       setArProduct(null);
+      setActiveTryOnPoster("");
+      setPreviewCacheByProductId({});
+      setArSessionPool([]);
     }
 
     startTransition(() => setScreen(nextScreen));
@@ -504,6 +566,10 @@ export default function App() {
     setCatalogError("");
     setSelectedProduct(null);
     setArProduct(null);
+    setArOpenNonce(0);
+    setPreviewCacheByProductId({});
+    setActiveTryOnPoster("");
+    setArSessionPool([]);
     setMemberLookupLoading(false);
     setMemberVerifyLoading(false);
     setJourneyScreen("landing");
@@ -513,31 +579,85 @@ export default function App() {
     setSelectedProduct(product);
   }
 
-  function handleOpenAR(product) {
+  function closeArPanel() {
+    setArProduct(null);
+    setArOpenNonce((current) => current + 1);
+    setPreviewCacheByProductId({});
+    setActiveTryOnPoster("");
+    setArSessionPool([]);
+  }
+
+  function handleOpenAR(product, options = {}) {
+    const { reusePoster = false } = options;
     setSelectedProduct(null);
+    const sourceProducts = visibleRecommendations.length ? visibleRecommendations : visibleCatalogResults;
+
+    if (!reusePoster) {
+      setPreviewCacheByProductId({});
+      setActiveTryOnPoster("");
+      setArSessionPool(buildArSessionPool(product, sourceProducts, 5));
+    } else {
+      setArSessionPool((current) => {
+        if (!current.length) {
+          return buildArSessionPool(product, sourceProducts, 5);
+        }
+
+        if (current.some((item) => item?.id === product?.id)) {
+          return current;
+        }
+
+        const appended = [...current, product].filter((item) => item?.id);
+        return appended.slice(0, 6);
+      });
+    }
+    setArOpenNonce((current) => current + 1);
     setArProduct(product);
   }
 
-  const heroProducts = experience?.featuredProducts || [];
-  const leadProduct = recommendations[0] || heroProducts[0] || null;
+  function handlePreviewComplete(product, imageUrl) {
+    if (!product?.id) {
+      return;
+    }
+
+    if (imageUrl) {
+      setPreviewCacheByProductId((current) => {
+        if (current[product.id] === imageUrl) {
+          return current;
+        }
+
+        return {
+          ...current,
+          [product.id]: imageUrl,
+        };
+      });
+    }
+  }
+
+  const leadProduct = recommendations[0] || null;
   const activityChoices = useMemo(
     () => [...new Set([shopperProfile?.activity, ...(experience?.activities || []), ...ACTIVITY_OPTIONS].filter(Boolean))],
     [experience?.activities, shopperProfile?.activity],
   );
   const visibleRecommendations = useMemo(
     () =>
-      recommendations.filter((product) => {
-        if (!matchesIntentFilters(product, searchIntent)) {
-          return false;
-        }
+      [...recommendations]
+        .filter((product) => {
+          if (!isGenderCompatible(product, shopperProfile?.gender)) {
+            return false;
+          }
 
-        return matchesSearch(product, deferredSearch) || scoreProductIntentMatch(product, searchIntent, deferredSearch) > 0;
-      }),
-    [deferredSearch, recommendations, searchIntent],
+          if (!matchesIntentFilters(product, searchIntent)) {
+            return false;
+          }
+
+          return matchesSearch(product, deferredSearch) || scoreProductIntentMatch(product, searchIntent, deferredSearch) > 0;
+        })
+        .sort((left, right) => Number(left.ranking || 9999) - Number(right.ranking || 9999)),
+    [deferredSearch, recommendations, searchIntent, shopperProfile?.gender],
   );
   const visibleCatalogResults = useMemo(() => {
     if (!deferredSearch.trim()) {
-      return catalogResults;
+      return catalogResults.filter((product) => isGenderCompatible(product, shopperProfile?.gender));
     }
 
     return [...catalogResults]
@@ -545,10 +665,25 @@ export default function App() {
         product,
         matchScore: scoreProductIntentMatch(product, searchIntent, deferredSearch),
       }))
-      .filter(({ product, matchScore }) => matchesSearch(product, deferredSearch) || matchScore > 0)
+      .filter(
+        ({ product, matchScore }) =>
+          isGenderCompatible(product, shopperProfile?.gender) && (matchesSearch(product, deferredSearch) || matchScore > 0),
+      )
       .sort((left, right) => right.matchScore - left.matchScore)
       .map(({ product }) => product);
-  }, [catalogResults, deferredSearch, searchIntent]);
+  }, [catalogResults, deferredSearch, searchIntent, shopperProfile?.gender]);
+  const arFollowUpProducts = useMemo(() => {
+    if (!arProduct) {
+      return [];
+    }
+
+    if (arSessionPool.length) {
+      return arSessionPool.filter((product) => product?.id && product.id !== arProduct.id).slice(0, 5);
+    }
+
+    const sourceProducts = visibleRecommendations.length ? visibleRecommendations : visibleCatalogResults;
+    return sourceProducts.filter((product) => product?.id && product.id !== arProduct.id).slice(0, 5);
+  }, [arProduct, arSessionPool, visibleCatalogResults, visibleRecommendations]);
   const isLandingScreen = screen === "landing";
   const isMemberScreen = screen === "member";
   const isGuestScreen = screen === "guest";
@@ -604,33 +739,8 @@ export default function App() {
               <span className="eyebrow">{APP_COPY.heroEyebrow}</span>
               <h1>{APP_COPY.heroTitle}</h1>
               <p>{APP_COPY.heroSubtitle}</p>
-
-              <div className="hero-metrics">
-                <div>
-                  <strong>{experience?.totalProducts || "..."}</strong>
-                  <span>products in the current rack</span>
-                </div>
-                <div>
-                  <strong>{experience?.activities?.length || "..."}</strong>
-                  <span>activity lenses ready</span>
-                </div>
-              </div>
-
             </div>
 
-            <div className="hero-visual">
-              <div className="hero-product-stage">
-                {heroProducts.slice(0, 3).map((product, index) => (
-                  <figure key={product.id} className={`hero-product hero-product-${index + 1}`}>
-                    <img src={product.image_url} alt={product.name} />
-                    <figcaption>
-                      <span>{product.category}</span>
-                      <strong>{product.name}</strong>
-                    </figcaption>
-                  </figure>
-                ))}
-              </div>
-            </div>
           </div>
 
           <div className="onboarding-flow">
@@ -851,11 +961,11 @@ export default function App() {
             <section className="workspace-list-scroll">
               <ProductGrid
                 className="catalog-section--compact"
-                title="Best picks for this shopper"
+                title="Recommended for you"
                 subtitle={
                   deferredSearch
                     ? `Showing ${visibleRecommendations.length} recommendation${visibleRecommendations.length === 1 ? "" : "s"} for "${deferredSearch}".`
-                    : "These are the strongest immediate options based on the active brief."
+                    : "These picks are ranked to your profile, cohort, and gender."
                 }
                 products={visibleRecommendations}
                 onOpenDetails={handleOpenDetails}
@@ -880,15 +990,16 @@ export default function App() {
       <ProductDetails product={selectedProduct} onBack={() => setSelectedProduct(null)} onOpenAR={handleOpenAR} />
 
       <AppErrorBoundary
-        resetKey={arProduct?.id || "no-ar-product"}
-        fallback={
+        resetKey={`${arProduct?.id || "no-ar-product"}:${arOpenNonce}`}
+        fallback={(error) =>
           arProduct ? (
             <section className="overlay-shell">
               <div className="overlay-card detail-panel">
                 <h2>Preview unavailable</h2>
                 <p>The try-on panel closed unexpectedly. Return to the rack and try again.</p>
+                {error?.message ? <p className="form-error">Error: {error.message}</p> : null}
                 <div className="detail-actions">
-                  <button type="button" className="primary-button" onClick={() => setArProduct(null)}>
+                  <button type="button" className="primary-button" onClick={closeArPanel}>
                     Back to rack
                   </button>
                 </div>
@@ -897,7 +1008,19 @@ export default function App() {
           ) : null
         }
       >
-        <ARPreview product={arProduct} onClose={() => setArProduct(null)} />
+        <ARPreview
+          product={arProduct}
+          onClose={closeArPanel}
+          followUpProducts={arFollowUpProducts}
+          onTryAnotherProduct={(nextProduct) => {
+            handleOpenAR(nextProduct, { reusePoster: true });
+          }}
+          onPreviewComplete={handlePreviewComplete}
+          onCapturePoster={setActiveTryOnPoster}
+          basePoster={activeTryOnPoster}
+          initialResultImage={arProduct?.id ? previewCacheByProductId[arProduct.id] || "" : ""}
+          previewCacheByProductId={previewCacheByProductId}
+        />
       </AppErrorBoundary>
     </main>
   );

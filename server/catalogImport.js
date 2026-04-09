@@ -46,6 +46,7 @@ function normalizeGenderLabel(value = "") {
     content.includes("womens") ||
     content.includes("woman's") ||
     content.includes("women's") ||
+    content.includes("tregging") ||
     content.includes("sports bra") ||
     content.includes("bralette")
   ) {
@@ -137,6 +138,23 @@ function inferGender(row = {}) {
   const inferredGender = normalizeGenderLabel(contextText);
   if (inferredGender) {
     return inferredGender;
+  }
+
+  const categoryText = String(row.Type || "").toLowerCase();
+  const titleText = String(row.Title || "").toLowerCase();
+  const combined = `${categoryText} ${titleText}`;
+  if (
+    combined.includes("tights") ||
+    combined.includes("leggings") ||
+    combined.includes("legging") ||
+    combined.includes("tregging") ||
+    combined.includes("sports bra")
+  ) {
+    if (combined.includes("men") || combined.includes("male")) {
+      return "Men";
+    }
+
+    return "Women";
   }
 
   return "Unisex";

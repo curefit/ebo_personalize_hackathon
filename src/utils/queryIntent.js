@@ -15,6 +15,8 @@ const CATEGORY_ALIASES = {
   jogger: "joggers",
   leggings: "tights",
   legging: "tights",
+  treggings: "tights",
+  tregging: "tights",
   tights: "tights",
   jacket: "jacket",
   hoodie: "jacket",
@@ -54,7 +56,7 @@ const INTENT_DICTIONARIES = {
     tank: ["tank", "tank top", "sleeveless"],
     shorts: ["shorts", "short"],
     joggers: ["joggers", "jogger", "track pants", "trackpant", "pants", "bottoms"],
-    tights: ["tights", "legging", "leggings"],
+    tights: ["tights", "legging", "leggings", "treggings", "tregging"],
     jacket: ["jacket", "hoodie", "sweatshirt", "outerwear"],
     "sports-bra": ["sports bra", "bra"],
   },
@@ -198,13 +200,23 @@ export function inferProductGender(product = {}) {
     if (explicitGender === "unisex") return "Unisex";
   }
 
+  const category = normalizeCategory(product.category);
+  const nameAndCategory = normalizeValue(`${product.name || ""} ${product.category || ""}`);
+  if (/(^|\\s)(tights|legging|leggings|treggings|tregging|sports bra|bralette)(\\s|$)/.test(nameAndCategory)) {
+    if (/(^|\\s)(men|male|man|mens)(\\s|$)/.test(nameAndCategory)) {
+      return "Men";
+    }
+
+    return "Women";
+  }
+
   const text = getProductDocument(product);
   const inferredGender = findFirstIntentMatch(text, INTENT_DICTIONARIES.gender);
   if (inferredGender) {
     return inferredGender;
   }
 
-  return normalizeCategory(product.category) === "sports-bra" ? "Women" : "Unisex";
+  return category === "sports-bra" ? "Women" : "Unisex";
 }
 
 export function getProductDocument(product = {}) {

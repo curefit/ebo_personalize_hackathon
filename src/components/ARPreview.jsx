@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { generateTryOn } from "../services/apiClient";
 import { SIZE_OPTIONS } from "../utils/constants";
+import { formatCurrency } from "../utils/helpers";
 
 const palette = {
   "Electric Blue": "#2563eb",
@@ -31,8 +32,78 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
-export default function ARPreview({ product, onClose }) {
-  const defaultSize = useMemo(() => product?.sizes?.[0] || SIZE_OPTIONS[0], [product]);
+function toOptionList(value, fallback = []) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || "").trim()).filter(Boolean);
+  }
+
+  if (typeof value === "string") {
+    return value
+      .split(/[|,/]/g)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  return fallback;
+}
+
+function resolveGarmentZone(product) {
+  const haystack = `${product?.category || ""} ${product?.name || ""}`.toLowerCase();
+  if (["track pants", "pants", "joggers", "shorts", "tights", "leggings", "bottom"].some((token) => haystack.includes(token))) {
+    return "lower";
+  }
+
+  return "upper";
+}
+
+async function stabilizeGeneratedImage(imageUrl, signal) {
+  if (!imageUrl) {
+    return "";
+  }
+
+  try {
+    const response = await fetch(imageUrl, { signal, cache: "no-store" });
+    if (!response.ok) {
+      return imageUrl;
+    }
+
+    const blob = await response.blob();
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(String(reader.result || imageUrl));
+      reader.onerror = () => reject(new Error("Failed to process generated image."));
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return imageUrl;
+  }
+}
+
+export default function ARPreview({
+  product,
+  onClose,
+  followUpProducts = [],
+  onTryAnotherProduct,
+  onPreviewComplete,
+  onCapturePoster,
+  basePoster = "",
+  initialResultImage = "",
+  previewCacheByProductId = {},
+}) {
+  const safeFollowUpProducts = useMemo(
+    () => (Array.isArray(followUpProducts) ? followUpProducts.filter((item) => item && typeof item === "object") : []),
+    [followUpProducts],
+  );
+  const garmentZone = useMemo(() => resolveGarmentZone(product), [product]);
+  const sizeOptions = useMemo(() => {
+    const parsed = toOptionList(product?.sizes, SIZE_OPTIONS);
+    return parsed.length ? parsed : SIZE_OPTIONS;
+  }, [product?.sizes]);
+  const colorOptions = useMemo(() => {
+    const parsed = toOptionList(product?.colors, ["Default"]);
+    return parsed.length ? parsed : ["Default"];
+  }, [product?.colors]);
+  const defaultSize = useMemo(() => sizeOptions[0] || SIZE_OPTIONS[0], [sizeOptions]);
   const [selectedSize, setSelectedSize] = useState(defaultSize);
   const [colorIndex, setColorIndex] = useState(0);
   const [cameraRequested, setCameraRequested] = useState(false);
@@ -40,10 +111,12 @@ export default function ARPreview({ product, onClose }) {
   const [cameraError, setCameraError] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [captureCountdown, setCaptureCountdown] = useState(0);
-  const [capturedFrame, setCapturedFrame] = useState("");
   const [resultImage, setResultImage] = useState("");
   const [generationError, setGenerationError] = useState("");
-  const [framing, setFraming] = useState({ scale: 0.92, offsetY: 0 });
+  const [framing, setFraming] = useState({
+    scale: garmentZone === "lower" ? 0.8 : 0.92,
+    offsetY: garmentZone === "lower" ? -22 : 0,
+  });
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const framingLoopRef = useRef(null);
@@ -51,6 +124,8 @@ export default function ARPreview({ product, onClose }) {
   const isGeneratingRef = useRef(false);
   const resultImageRef = useRef("");
   const tryOnAbortControllerRef = useRef(null);
+  const prefetchControllersRef = useRef([]);
+  const prefetchInFlightByProductIdRef = useRef(new Set());
   const closingRef = useRef(false);
   const mountedRef = useRef(false);
 
@@ -94,6 +169,14 @@ export default function ARPreview({ product, onClose }) {
     tryOnAbortControllerRef.current = null;
   }
 
+  function clearPrefetchGenerations() {
+    for (const controller of prefetchControllersRef.current) {
+      controller.abort();
+    }
+    prefetchControllersRef.current = [];
+    prefetchInFlightByProductIdRef.current.clear();
+  }
+
   useEffect(() => {
     isGeneratingRef.current = isGenerating;
   }, [isGenerating]);
@@ -110,6 +193,7 @@ export default function ARPreview({ product, onClose }) {
       mountedRef.current = false;
       clearCountdown(false);
       cancelTryOnGeneration();
+      clearPrefetchGenerations();
       stopCameraStream();
     };
   }, []);
@@ -124,11 +208,13 @@ export default function ARPreview({ product, onClose }) {
     setCameraError("");
     setIsGenerating(false);
     setCaptureCountdown(0);
-    setCapturedFrame("");
-    setResultImage("");
+    setResultImage(initialResultImage || "");
     setGenerationError("");
-    setFraming({ scale: 0.92, offsetY: 0 });
-  }, [defaultSize, product]);
+    setFraming({
+      scale: garmentZone === "lower" ? 0.8 : 0.92,
+      offsetY: garmentZone === "lower" ? -22 : 0,
+    });
+  }, [defaultSize, garmentZone, initialResultImage, product]);
 
   useEffect(() => {
     if (!product || !cameraRequested) {
@@ -198,7 +284,7 @@ export default function ARPreview({ product, onClose }) {
         }
 
         setCameraState("ready");
-        stopFraming = startSmartFraming(track);
+        stopFraming = startSmartFraming(track) || (() => {});
       } catch (error) {
         if (!cancelled && canUpdateState()) {
           setCameraState("error");
@@ -232,14 +318,20 @@ export default function ARPreview({ product, onClose }) {
             const { width, y, height } = face.boundingBox;
             const faceRatio = width / video.videoWidth;
             const centerY = (y + height / 2) / video.videoHeight;
-            const scale = clamp(0.92 + (0.14 - faceRatio) * 0.85, 0.88, 1.02);
-            const offsetY = clamp((0.27 - centerY) * 110, -38, 22);
+            const scale = garmentZone === "lower"
+              ? clamp(0.8 + (0.13 - faceRatio) * 0.95, 0.72, 0.9)
+              : clamp(0.92 + (0.14 - faceRatio) * 0.85, 0.88, 1.02);
+            const offsetY = garmentZone === "lower"
+              ? clamp((0.2 - centerY) * 145, -70, 8)
+              : clamp((0.27 - centerY) * 110, -38, 22);
             if (canUpdateState()) {
               setFraming({ scale, offsetY });
             }
 
             if (capabilities.zoom && typeof capabilities.zoom.min === "number" && typeof capabilities.zoom.max === "number") {
-              const zoomProgress = clamp((0.11 - faceRatio) / 0.07, 0, 1);
+              const zoomProgress = garmentZone === "lower"
+                ? 0
+                : clamp((0.11 - faceRatio) / 0.07, 0, 1);
               const zoomTarget =
                 capabilities.zoom.min + zoomProgress * (capabilities.zoom.max - capabilities.zoom.min) * 0.12;
               track.applyConstraints({ advanced: [{ zoom: zoomTarget }] }).catch(() => {});
@@ -267,7 +359,13 @@ export default function ARPreview({ product, onClose }) {
 
     return () => {
       cancelled = true;
-      stopFraming();
+      if (typeof stopFraming === "function") {
+        try {
+          stopFraming();
+        } catch {
+          // Ignore teardown-only errors so preview closes cleanly.
+        }
+      }
       stopCameraStream();
       clearCountdown();
     };
@@ -277,11 +375,13 @@ export default function ARPreview({ product, onClose }) {
     return null;
   }
 
-  const activeColor = product.colors[colorIndex];
+  const availableColors = colorOptions;
+  const availableSizes = sizeOptions;
+  const activeColor = availableColors[colorIndex] || availableColors[0];
   const fill = palette[activeColor] || "#2563eb";
 
   function rotateColor(direction) {
-    const total = product.colors.length;
+    const total = availableColors.length;
     setColorIndex((current) => (current + direction + total) % total);
   }
 
@@ -302,14 +402,19 @@ export default function ARPreview({ product, onClose }) {
   }
 
   async function handleTryOn() {
+    const personImage = captureFrame();
+    onCapturePoster?.(personImage);
+    await runTryOn(personImage, { allowPrefetch: true });
+  }
+
+  async function runTryOn(personImage, options = {}) {
+    const { allowPrefetch = true } = options;
     const abortController = new AbortController();
     tryOnAbortControllerRef.current = abortController;
 
     try {
       setGenerationError("");
       setIsGenerating(true);
-      const personImage = captureFrame();
-      setCapturedFrame(personImage);
       const payload = await generateTryOn({
         personImage,
         referenceImage: product.image_url,
@@ -318,13 +423,23 @@ export default function ARPreview({ product, onClose }) {
         size: selectedSize,
         material: product.material,
         fit: product.fit,
+        category: product.category,
       }, { signal: abortController.signal });
 
       if (abortController.signal.aborted || closingRef.current) {
         return;
       }
 
-      setResultImage(payload.result.imageUrl);
+      const stableImage = await stabilizeGeneratedImage(payload.result.imageUrl, abortController.signal);
+      if (abortController.signal.aborted || closingRef.current) {
+        return;
+      }
+
+      setResultImage(stableImage);
+      onPreviewComplete?.(product, stableImage);
+      if (allowPrefetch) {
+        prefetchFollowUpPreviews(personImage);
+      }
     } catch (error) {
       if (error.name === "AbortError" || abortController.signal.aborted || closingRef.current) {
         return;
@@ -340,6 +455,102 @@ export default function ARPreview({ product, onClose }) {
         setIsGenerating(false);
       }
     }
+  }
+
+  useEffect(() => {
+    if (!basePoster || !safeFollowUpProducts.length || closingRef.current) {
+      return;
+    }
+
+    prefetchFollowUpPreviews(basePoster);
+  }, [basePoster, product?.id, safeFollowUpProducts]);
+
+  async function generatePreviewForProduct(personImage, nextProduct, nextColor, nextSize, abortController) {
+    const payload = await generateTryOn(
+      {
+        personImage,
+        referenceImage: nextProduct.image_url,
+        productName: nextProduct.name,
+        color: nextColor,
+        size: nextSize,
+        material: nextProduct.material,
+        fit: nextProduct.fit,
+        category: nextProduct.category,
+      },
+      { signal: abortController.signal },
+    );
+
+    return stabilizeGeneratedImage(payload.result.imageUrl, abortController.signal);
+  }
+
+  async function prefetchFollowUpPreviews(personImage) {
+    const candidates = safeFollowUpProducts
+      .filter((nextProduct) => {
+        if (!nextProduct?.id || nextProduct.id === product?.id || !nextProduct.image_url) {
+          return false;
+        }
+
+        if (previewCacheByProductId[nextProduct.id]) {
+          return false;
+        }
+
+        if (prefetchInFlightByProductIdRef.current.has(nextProduct.id)) {
+          return false;
+        }
+
+        return true;
+      });
+
+    if (!candidates.length) {
+      return;
+    }
+
+    const maxConcurrentPrefetch = 3;
+    let cursor = 0;
+
+    const worker = async () => {
+      while (cursor < candidates.length && !closingRef.current) {
+        const nextProduct = candidates[cursor];
+        cursor += 1;
+
+        const abortController = new AbortController();
+        prefetchControllersRef.current.push(abortController);
+        prefetchInFlightByProductIdRef.current.add(nextProduct.id);
+
+        try {
+          const nextColorList = toOptionList(nextProduct.colors, ["Default"]);
+          const nextSizeList = toOptionList(nextProduct.sizes, [selectedSize]);
+          const nextColor = nextColorList[0] || "Default";
+          const nextSize = nextSizeList[0] || selectedSize;
+          const stableImage = await generatePreviewForProduct(personImage, nextProduct, nextColor, nextSize, abortController);
+          if (!abortController.signal.aborted && !closingRef.current && stableImage) {
+            onPreviewComplete?.(nextProduct, stableImage);
+          }
+        } catch {
+          if (!abortController.signal.aborted && !closingRef.current) {
+            try {
+              await new Promise((resolve) => window.setTimeout(resolve, 220));
+              const nextColorList = toOptionList(nextProduct.colors, ["Default"]);
+              const nextSizeList = toOptionList(nextProduct.sizes, [selectedSize]);
+              const nextColor = nextColorList[0] || "Default";
+              const nextSize = nextSizeList[0] || selectedSize;
+              const retryImage = await generatePreviewForProduct(personImage, nextProduct, nextColor, nextSize, abortController);
+              if (!abortController.signal.aborted && !closingRef.current && retryImage) {
+                onPreviewComplete?.(nextProduct, retryImage);
+              }
+            } catch {
+              // Best-effort prefetch: ignore failures.
+            }
+          }
+        } finally {
+          prefetchInFlightByProductIdRef.current.delete(nextProduct.id);
+          prefetchControllersRef.current = prefetchControllersRef.current.filter((controller) => controller !== abortController);
+        }
+      }
+    };
+
+    const workers = Array.from({ length: Math.min(maxConcurrentPrefetch, candidates.length) }, () => worker());
+    await Promise.all(workers);
   }
 
   function handleCaptureStart() {
@@ -378,6 +589,7 @@ export default function ARPreview({ product, onClose }) {
             closingRef.current = true;
             clearCountdown();
             cancelTryOnGeneration();
+            clearPrefetchGenerations();
             stopCameraStream();
             onClose();
           }}
@@ -389,15 +601,16 @@ export default function ARPreview({ product, onClose }) {
         <div className="ar-copy">
           <span className="eyebrow">Try-On Preview</span>
           <h2>{product.name}</h2>
-          <p>Take one clear picture and we will fit the selected T-shirt onto your body.</p>
+          <p>
+            Take one clear picture and we will fit this selected {garmentZone === "lower" ? "bottomwear" : "topwear"} onto
+            your body.
+          </p>
         </div>
 
         <div className="ar-stage">
           <div className="camera-shell">
             {resultImage ? (
               <img src={resultImage} alt={`${product.name} try-on result`} className="camera-feed result-feed" />
-            ) : capturedFrame ? (
-              <img src={capturedFrame} alt="Captured frame" className="camera-feed result-feed captured-feed" />
             ) : (
               <video
                 ref={videoRef}
@@ -411,10 +624,14 @@ export default function ARPreview({ product, onClose }) {
               />
             )}
 
-            {!cameraRequested ? (
+            {!cameraRequested && !resultImage ? (
               <div className="camera-overlay camera-message camera-consent">
                 <strong>Camera will open for body framing.</strong>
-                <p>Stand 4-6 feet away so your head, shoulders, and torso fit inside the frame.</p>
+                <p>
+                  {garmentZone === "lower"
+                    ? "Stand 6-8 feet away so your waist and legs are visible."
+                    : "Stand 4-6 feet away so your head, shoulders, and torso fit inside the frame."}
+                </p>
                 <div className="consent-actions">
                   <button
                     type="button"
@@ -423,6 +640,7 @@ export default function ARPreview({ product, onClose }) {
                       closingRef.current = true;
                       clearCountdown();
                       cancelTryOnGeneration();
+                      clearPrefetchGenerations();
                       stopCameraStream();
                       onClose();
                     }}
@@ -447,7 +665,9 @@ export default function ARPreview({ product, onClose }) {
               <div className="camera-overlay">
                 <div className="fit-frame">
                   <div className="fit-frame-copy">
-                    <strong>Fit your upper body inside this frame</strong>
+                    <strong>
+                      {garmentZone === "lower" ? "Fit your waist-to-ankle view inside this frame" : "Fit your upper body inside this frame"}
+                    </strong>
                     <span>Smart framing will adjust as you move.</span>
                   </div>
                 </div>
@@ -457,7 +677,7 @@ export default function ARPreview({ product, onClose }) {
             {isGenerating ? (
               <div className="camera-overlay camera-message">
                 <strong>Generating your try-on...</strong>
-                <p>Applying the selected T-shirt to your captured photo.</p>
+                <p>Applying the selected product to your captured photo.</p>
               </div>
             ) : null}
 
@@ -474,7 +694,7 @@ export default function ARPreview({ product, onClose }) {
           <label className="field compact-field">
             <span>Size</span>
             <select value={selectedSize} onChange={(event) => setSelectedSize(event.target.value)}>
-              {product.sizes.map((size) => (
+              {availableSizes.map((size) => (
                 <option key={size} value={size}>
                   {size}
                 </option>
@@ -513,7 +733,6 @@ export default function ARPreview({ product, onClose }) {
                 type="button"
                 className="ghost-button"
                 onClick={() => {
-                  setCapturedFrame("");
                   setResultImage("");
                   setGenerationError("");
                 }}
@@ -525,6 +744,45 @@ export default function ARPreview({ product, onClose }) {
         </div>
 
         {generationError ? <p className="form-error tryon-error">{generationError}</p> : null}
+
+        {resultImage ? (
+          <div className="ar-followups">
+            <div className="ar-followup-head">
+              <strong>Preview done for {product.name}</strong>
+              <span>Saved in recommendations</span>
+            </div>
+            {safeFollowUpProducts.length ? (
+              <>
+                <div className="ar-followup-head">
+                  <strong>This also fits you well</strong>
+                  <span>Recommended for you</span>
+                </div>
+                <div className="ar-followup-grid">
+                  {safeFollowUpProducts.map((nextProduct) => (
+                    <button
+                      key={nextProduct.id}
+                      type="button"
+                      className="ar-followup-item"
+                      disabled={!previewCacheByProductId[nextProduct.id]}
+                      onClick={() => {
+                        if (previewCacheByProductId[nextProduct.id]) {
+                          onTryAnotherProduct?.(nextProduct);
+                        }
+                      }}
+                    >
+                      <img src={nextProduct.image_url} alt={nextProduct.name} />
+                      <span className="ar-followup-copy">
+                        <strong>{nextProduct.name}</strong>
+                        <small>{formatCurrency(nextProduct.price)}</small>
+                        <small>{previewCacheByProductId[nextProduct.id] ? "Preview ready" : "Preparing preview..."}</small>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </section>
   );

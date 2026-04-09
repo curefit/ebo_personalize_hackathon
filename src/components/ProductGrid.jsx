@@ -1,6 +1,14 @@
 import { formatCurrency } from "../utils/helpers";
 
-export default function ProductGrid({ title, subtitle, products, onOpenDetails, onOpenAR, emptyCopy, className = "" }) {
+export default function ProductGrid({
+  title,
+  subtitle,
+  products,
+  onOpenDetails,
+  onOpenAR,
+  emptyCopy,
+  className = "",
+}) {
   const sectionClassName = `catalog-section ${className}`.trim();
 
   if (!products?.length) {
@@ -37,7 +45,7 @@ export default function ProductGrid({ title, subtitle, products, onOpenDetails, 
             <div className="catalog-copy">
               <div className="catalog-copy-top">
                 <div>
-                  <span className="catalog-kicker">{product.category}</span>
+                  <span className="catalog-kicker">{product.recommendedForYou ? "Recommended for you" : product.category}</span>
                   <h3>{product.name}</h3>
                 </div>
                 <strong>{formatCurrency(product.price)}</strong>
