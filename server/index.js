@@ -13,6 +13,7 @@ import {
   hasCatalogDatabase,
 } from "./catalogDb.js";
 import { getCohortRecommendedSkus } from "./cohortRecommendationService.js";
+import { getNonMemberRecommendedSkus } from "./nonMemberTagRecommendationService.js";
 import {
   fetchCultAppMemberByPhone,
   fetchItemDetailsSummaryBySkus,
@@ -64,6 +65,16 @@ function normalizeSkuCode(value = "") {
   return String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
+function hasMasculineMarkers(value = "") {
+  const text = String(value || "").toLowerCase();
+  return /\b(men|men's|mens|male|man|gents|gent)\b/.test(text);
+}
+
+function hasFeminineMarkers(value = "") {
+  const text = String(value || "").toLowerCase();
+  return /\b(women|women's|womens|female|woman|ladies|lady|girl|girls)\b/.test(text);
+}
+
 function isGenderCompatible(productGender, preferredGender, productContext = "") {
   const normalizedPreference = normalizeGenderPreference(preferredGender);
   if (!normalizedPreference || normalizedPreference === "Any") {
@@ -71,7 +82,13 @@ function isGenderCompatible(productGender, preferredGender, productContext = "")
   }
 
   const normalizedContext = String(productContext || "").toLowerCase();
+  if (normalizedPreference === "Women" && hasMasculineMarkers(normalizedContext)) {
+    return false;
+  }
   if (normalizedPreference === "Men" && normalizedContext.includes("tregging")) {
+    return false;
+  }
+  if (normalizedPreference === "Men" && hasFeminineMarkers(normalizedContext)) {
     return false;
   }
 
@@ -180,6 +197,33 @@ async function getPrioritizedCohortProductIds(cohort, preferredGender) {
     }
 
     if (!isGenderCompatible(detail?.gender, preferredGender)) {
+      continue;
+    }
+
+    seenProductIds.add(productId);
+    prioritizedProductIds.push(productId);
+  }
+
+  return prioritizedProductIds;
+}
+
+function getPrioritizedGuestProductIds(profile) {
+  if (!hasCatalogDatabase()) {
+    return [];
+  }
+
+  const guestSkus = getNonMemberRecommendedSkus(profile, 1200).map(normalizeSkuCode).filter(Boolean);
+  if (!guestSkus.length) {
+    return [];
+  }
+
+  const skuToProductId = getCatalogProductIdsBySkus(guestSkus);
+  const prioritizedProductIds = [];
+  const seenProductIds = new Set();
+
+  for (const sku of guestSkus) {
+    const productId = skuToProductId[sku];
+    if (!productId || seenProductIds.has(productId)) {
       continue;
     }
 
@@ -424,12 +468,13 @@ async function buildExperiencePayload() {
 }
 
 async function buildRecommendationPayload(profile, limit = 10) {
+  const isGuestProfile = profile?.userType === "guest";
   const normalizedProfileGender = normalizeGenderPreference(profile?.gender) || "Any";
   const baseFilters = {
     currentStoreId: CURRENT_STORE_ID,
-    activity: profile?.activity,
-    fit: profile?.preferred_fit,
-    material: profile?.material_preference,
+    activity: isGuestProfile ? "" : profile?.activity,
+    fit: isGuestProfile ? "" : profile?.preferred_fit,
+    material: isGuestProfile ? "" : profile?.material_preference,
     gender: normalizedProfileGender === "Any" ? "" : normalizedProfileGender,
   };
 
@@ -473,7 +518,9 @@ async function buildRecommendationPayload(profile, limit = 10) {
     : widenedCandidates;
 
   const baselineRecommendations = getRecommendations(cohortSupportPool, activeProfile, Math.max(limit * 4, 24));
-  const prioritizedProductIds = await getPrioritizedCohortProductIds(profile?.cohort, normalizedProfileGender);
+  const prioritizedProductIds = isGuestProfile
+    ? getPrioritizedGuestProductIds(profile)
+    : await getPrioritizedCohortProductIds(profile?.cohort, normalizedProfileGender);
   const recommendations = promoteRecommendations(baselineRecommendations, cohortSupportPool, prioritizedProductIds, limit);
 
   const profileSummary = summarizeProfile({

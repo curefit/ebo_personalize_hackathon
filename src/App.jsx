@@ -22,11 +22,53 @@ import { matchesIntentFilters, parseShopperIntent, scoreProductIntentMatch } fro
 import { buildGuestName, getInitials, normalizePhoneNumber } from "./utils/helpers";
 
 function buildGuestProfile(answers) {
+  const workoutToActivity = {
+    "Cardio (running, cycling)": "Running",
+    "Strength (weights, resistance)": "Gym",
+    "Flexibility (yoga, Pilates)": "Yoga",
+    "Sports (football, tennis, etc.)": "Sports",
+    Others: "Casual",
+  };
+  const styleToFit = {
+    "Function first": "Lightweight",
+    "Style first": "Regular",
+    "Both equally": "Regular",
+  };
+  const discomfortToMaterial = {
+    "Foot/leg discomfort": "Moisture-wicking",
+    "Back/shoulder pain": "Blend",
+    "No issues": "Cotton",
+    Others: "Breathable",
+  };
+  const companyToGoal = {
+    Alone: "Train hard",
+    "With a friend/partner": "Complete look",
+    "Group classes": "Studio ease",
+  };
+  const normalizedGender = answers.gender === "Female" ? "Women" : answers.gender === "Male" ? "Men" : "Any";
+  const resolvedActivity = workoutToActivity[answers.workout_type] || "Casual";
+  const resolvedFit = styleToFit[answers.style_priority] || "Regular";
+  const resolvedMaterial = discomfortToMaterial[answers.discomfort] || "Breathable";
+  const resolvedGoal = companyToGoal[answers.workout_company] || "Train hard";
+  const styleNote = [
+    answers.discomfort ? `Discomfort: ${answers.discomfort}` : "",
+    answers.style_priority ? `Preference: ${answers.style_priority}` : "",
+    answers.workout_company ? `Workout mode: ${answers.workout_company}` : "",
+  ]
+    .filter(Boolean)
+    .join(" | ");
+
   return {
     ...answers,
-    gender: answers.gender || "Any",
+    activity: resolvedActivity,
+    preferred_fit: resolvedFit,
+    material_preference: resolvedMaterial,
+    session_goal: resolvedGoal,
+    budget_band: "Balanced",
+    gender: normalizedGender,
     userType: "guest",
-    name: buildGuestName(answers.activity),
+    name: buildGuestName(resolvedActivity),
+    style_note: styleNote,
     fitness_level: "Walk-in",
   };
 }
@@ -117,6 +159,16 @@ function normalizeGenderValue(value = "") {
   return "Any";
 }
 
+function hasMasculineMarkers(value = "") {
+  const text = String(value || "").toLowerCase();
+  return /\b(men|men's|mens|male|man|gents|gent)\b/.test(text);
+}
+
+function hasFeminineMarkers(value = "") {
+  const text = String(value || "").toLowerCase();
+  return /\b(women|women's|womens|female|woman|ladies|lady|girl|girls)\b/.test(text);
+}
+
 function isGenderCompatible(product, profileGender) {
   const preferred = normalizeGenderValue(profileGender);
   if (preferred === "Any") {
@@ -124,7 +176,13 @@ function isGenderCompatible(product, profileGender) {
   }
 
   const productText = `${product?.name || ""} ${product?.category || ""}`.toLowerCase();
+  if (preferred === "Women" && hasMasculineMarkers(productText)) {
+    return false;
+  }
   if (preferred === "Men" && productText.includes("tregging")) {
+    return false;
+  }
+  if (preferred === "Men" && hasFeminineMarkers(productText)) {
     return false;
   }
 

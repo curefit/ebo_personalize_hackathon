@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "db:bootstrap": "bash scripts/node24.sh scripts/bootstrapCatalogDb.js",
+    "db:import-nonmember-tags": "bash scripts/node24.sh scripts/importNonMemberTagFeed.js",
     "dev": "concurrently \"npm:dev:server\" \"npm:dev:client\"",
     "dev:client": "vite",
     "dev:server": "bash scripts/node24.sh --env-file-if-exists=.env server/index.js",
