@@ -109,8 +109,10 @@ export default function ARPreview({
   const [cameraRequested, setCameraRequested] = useState(false);
   const [cameraState, setCameraState] = useState("idle");
   const [cameraError, setCameraError] = useState("");
+  const [cameraRestartToken, setCameraRestartToken] = useState(0);
   const [isGenerating, setIsGenerating] = useState(false);
   const [captureCountdown, setCaptureCountdown] = useState(0);
+  const [capturedFrame, setCapturedFrame] = useState("");
   const [resultImage, setResultImage] = useState("");
   const [generationError, setGenerationError] = useState("");
   const [framing, setFraming] = useState({
@@ -206,8 +208,10 @@ export default function ARPreview({
     setCameraRequested(false);
     setCameraState("idle");
     setCameraError("");
+    setCameraRestartToken(0);
     setIsGenerating(false);
     setCaptureCountdown(0);
+    setCapturedFrame("");
     setResultImage(initialResultImage || "");
     setGenerationError("");
     setFraming({
@@ -369,7 +373,7 @@ export default function ARPreview({
       stopCameraStream();
       clearCountdown();
     };
-  }, [cameraRequested, product]);
+  }, [cameraRequested, cameraRestartToken, product]);
 
   if (!product) {
     return null;
@@ -403,6 +407,9 @@ export default function ARPreview({
 
   async function handleTryOn() {
     const personImage = captureFrame();
+    setCapturedFrame(personImage);
+    stopCameraStream();
+    setCameraState("idle");
     onCapturePoster?.(personImage);
     await runTryOn(personImage, { allowPrefetch: true });
   }
@@ -446,6 +453,10 @@ export default function ARPreview({
       }
 
       setGenerationError(error.message);
+      if (canUpdateState() && cameraRequested) {
+        setCameraState("loading");
+        setCameraRestartToken((current) => current + 1);
+      }
     } finally {
       if (tryOnAbortControllerRef.current === abortController) {
         tryOnAbortControllerRef.current = null;
@@ -558,6 +569,7 @@ export default function ARPreview({
       return;
     }
 
+    setCapturedFrame("");
     setGenerationError("");
     clearCountdown();
     setCaptureCountdown(3);
@@ -611,6 +623,8 @@ export default function ARPreview({
           <div className="camera-shell">
             {resultImage ? (
               <img src={resultImage} alt={`${product.name} try-on result`} className="camera-feed result-feed" />
+            ) : isGenerating && capturedFrame ? (
+              <img src={capturedFrame} alt="Captured preview frame" className="camera-feed result-feed" />
             ) : (
               <video
                 ref={videoRef}
@@ -654,14 +668,14 @@ export default function ARPreview({
               </div>
             ) : null}
 
-            {cameraRequested && cameraState !== "ready" && !resultImage ? (
+            {cameraRequested && cameraState !== "ready" && !resultImage && !isGenerating ? (
               <div className="camera-overlay camera-message">
                 <strong>{cameraState === "loading" ? "Opening camera..." : "Camera unavailable"}</strong>
                 <p>{cameraError || "Waiting for camera permission."}</p>
               </div>
             ) : null}
 
-            {cameraRequested && !resultImage && cameraState === "ready" ? (
+            {cameraRequested && !resultImage && cameraState === "ready" && !isGenerating ? (
               <div className="camera-overlay">
                 <div className="fit-frame">
                   <div className="fit-frame-copy">
@@ -676,7 +690,7 @@ export default function ARPreview({
 
             {isGenerating ? (
               <div className="camera-overlay camera-message">
-                <strong>Generating your try-on...</strong>
+                <strong>Generating your image...</strong>
                 <p>Applying the selected product to your captured photo.</p>
               </div>
             ) : null}
@@ -734,7 +748,10 @@ export default function ARPreview({
                 className="ghost-button"
                 onClick={() => {
                   setResultImage("");
+                  setCapturedFrame("");
                   setGenerationError("");
+                  setCameraState("loading");
+                  setCameraRestartToken((current) => current + 1);
                 }}
               >
                 Retake

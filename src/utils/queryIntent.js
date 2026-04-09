@@ -197,7 +197,11 @@ export function inferProductGender(product = {}) {
   if (explicitGender) {
     if (["men", "male"].includes(explicitGender)) return "Men";
     if (["women", "female"].includes(explicitGender)) return "Women";
-    if (explicitGender === "unisex") return "Unisex";
+    if (explicitGender === "unisex") {
+      // Continue to infer from product text because some catalog entries are mislabeled as unisex.
+    } else {
+      return "Unisex";
+    }
   }
 
   const category = normalizeCategory(product.category);

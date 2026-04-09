@@ -392,13 +392,18 @@ export function getCatalogProduct(productId) {
 }
 
 export function getCatalogProductIdsBySkus(skuCodes = []) {
-  const normalizedSkus = [...new Set(
+  const rawSkus = [...new Set(
     skuCodes
       .map((value) => String(value || "").trim().toUpperCase())
       .filter(Boolean),
   )];
+  const compactSkus = [...new Set(
+    rawSkus
+      .map((value) => value.replace(/[^A-Z0-9]/g, ""))
+      .filter(Boolean),
+  )];
 
-  if (!normalizedSkus.length) {
+  if (!rawSkus.length && !compactSkus.length) {
     return {};
   }
 
@@ -408,27 +413,98 @@ export function getCatalogProductIdsBySkus(skuCodes = []) {
   }
 
   try {
-    const placeholders = normalizedSkus.map(() => "?").join(", ");
+    const normalizedSkuExpression =
+      "upper(replace(replace(replace(replace(trim(coalesce(sku, '')), '!', ''), ' ', ''), '-', ''), '/', ''))";
+    const whereClauses = [];
+    const values = [];
+
+    if (rawSkus.length) {
+      const placeholders = rawSkus.map(() => "?").join(", ");
+      whereClauses.push(`upper(trim(coalesce(sku, ''))) in (${placeholders})`);
+      values.push(...rawSkus);
+    }
+
+    if (compactSkus.length) {
+      const placeholders = compactSkus.map(() => "?").join(", ");
+      whereClauses.push(`${normalizedSkuExpression} in (${placeholders})`);
+      values.push(...compactSkus);
+    }
+
     const rows = db
       .prepare(`
         select
           upper(trim(coalesce(sku, ''))) as sku_code,
+          ${normalizedSkuExpression} as normalized_sku_code,
           product_id,
           quantity
         from product_variants
-        where upper(trim(coalesce(sku, ''))) in (${placeholders})
+        where ${whereClauses.join(" or ")}
         order by quantity desc, product_id asc
       `)
-      .all(...normalizedSkus);
+      .all(...values);
 
-    const skuToProductId = {};
+    const directSkuToProductId = {};
     for (const row of rows) {
-      if (!row?.sku_code || !row?.product_id) {
+      if (!row?.product_id) {
         continue;
       }
 
-      if (!skuToProductId[row.sku_code]) {
-        skuToProductId[row.sku_code] = row.product_id;
+      if (row.sku_code && !directSkuToProductId[row.sku_code]) {
+        directSkuToProductId[row.sku_code] = row.product_id;
+      }
+
+      if (row.normalized_sku_code && !directSkuToProductId[row.normalized_sku_code]) {
+        directSkuToProductId[row.normalized_sku_code] = row.product_id;
+      }
+    }
+
+    const skuToProductId = { ...directSkuToProductId };
+    const unresolvedCompactSkus = [];
+
+    for (const rawSku of rawSkus) {
+      const compactSku = rawSku.replace(/[^A-Z0-9]/g, "");
+      const mappedProductId = directSkuToProductId[rawSku] || directSkuToProductId[compactSku];
+      if (mappedProductId) {
+        skuToProductId[rawSku] = mappedProductId;
+        if (compactSku) {
+          skuToProductId[compactSku] = mappedProductId;
+        }
+      } else if (compactSku) {
+        unresolvedCompactSkus.push(compactSku);
+      }
+    }
+
+    if (unresolvedCompactSkus.length) {
+      const uniqueUnresolved = [...new Set(unresolvedCompactSkus)];
+      const likeClause = uniqueUnresolved.map(() => `${normalizedSkuExpression} like ?`).join(" or ");
+      const likeValues = uniqueUnresolved.map((value) => `${value}%`);
+
+      const prefixRows = db
+        .prepare(`
+          select
+            ${normalizedSkuExpression} as normalized_sku_code,
+            product_id,
+            quantity
+          from product_variants
+          where ${likeClause}
+          order by quantity desc, product_id asc
+        `)
+        .all(...likeValues);
+
+      for (const unresolvedSku of uniqueUnresolved) {
+        const match = prefixRows.find((row) => row?.normalized_sku_code?.startsWith?.(unresolvedSku) && row?.product_id);
+        if (!match?.product_id) {
+          continue;
+        }
+
+        skuToProductId[unresolvedSku] = match.product_id;
+      }
+
+      for (const rawSku of rawSkus) {
+        const compactSku = rawSku.replace(/[^A-Z0-9]/g, "");
+        if (!skuToProductId[rawSku] && compactSku && skuToProductId[compactSku]) {
+          skuToProductId[rawSku] = skuToProductId[compactSku];
+        }
       }
     }
 

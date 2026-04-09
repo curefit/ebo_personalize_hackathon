@@ -67,6 +67,19 @@ npm install
 npm run dev
 ```
 
+This repo now includes:
+
+- a committed SQLite catalog file at `data/catalog.sqlite`
+- a bundled non-member recommendation seed at `db/seeds/codex_feed_non_member_tags.csv`
+
+So a fresh clone can run directly without downloading external Excel/CSV files.
+
+If you ever receive an updated non-member tag feed, import it with:
+
+```bash
+npm run db:import-nonmember-tags -- /absolute/path/to/codex_feed_non_member_tags.csv
+```
+
 Default local URLs:
 
 - shopper kiosk: `http://localhost:5173/`
