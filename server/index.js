@@ -1,6 +1,6 @@
 import cors from "cors";
 import express from "express";
-import { getSpreadsheetCatalog, getSpreadsheetProduct, hasSpreadsheetCatalog } from "./catalogService.js";
+import { getCatalogProduct, getCatalogProducts, hasCatalogDatabase } from "./catalogDb.js";
 import {
   fetchCultAppMemberByPhone,
   fetchInventoryFromMetabase,
@@ -48,9 +48,9 @@ function summarizeStoreInventory(entries, storeId) {
 }
 
 function buildInventoryResponse(productId, currentStoreId = CURRENT_STORE_ID) {
-  const spreadsheetProduct = getSpreadsheetProduct(productId);
-  if (spreadsheetProduct) {
-    const currentStoreItems = spreadsheetProduct.variants
+  const catalogProduct = getCatalogProduct(productId);
+  if (catalogProduct) {
+    const currentStoreItems = catalogProduct.variants
       .filter((variant) => Number(variant.quantity) > 0)
       .map((variant) => ({
         size: variant.size,
@@ -59,7 +59,7 @@ function buildInventoryResponse(productId, currentStoreId = CURRENT_STORE_ID) {
       }));
 
     return {
-      product_id: spreadsheetProduct.id,
+      product_id: catalogProduct.id,
       currentStore: {
         store_id: currentStoreId,
         store_name: "EBO - Current Store",
@@ -108,21 +108,11 @@ function enrichProduct(product, currentStoreId = CURRENT_STORE_ID) {
 }
 
 async function getProducts(filters = {}) {
-  if (hasSpreadsheetCatalog()) {
-    const spreadsheetProducts = getSpreadsheetCatalog()
-      .filter((product) => {
-        const activityMatch = !filters.activity || product.activity === filters.activity;
-        const fitMatch = !filters.fit || product.fit === filters.fit;
-        const materialMatch =
-          !filters.material ||
-          `${product.material} ${product.material_tag}`.toLowerCase().includes(String(filters.material).toLowerCase());
+  if (hasCatalogDatabase()) {
+    const catalogProducts = getCatalogProducts(filters).map((product) => enrichProduct(product, filters.currentStoreId));
 
-        return activityMatch && fitMatch && materialMatch;
-      })
-      .map((product) => enrichProduct(product, filters.currentStoreId));
-
-    if (spreadsheetProducts.length) {
-      return spreadsheetProducts;
+    if (catalogProducts.length) {
+      return catalogProducts;
     }
   }
 
@@ -179,7 +169,7 @@ async function getMember(phone) {
 app.get("/api/health", (_request, response) => {
   response.json({
     ok: true,
-    mode: isMetabaseConfigured() ? "metabase" : "mock",
+    mode: hasCatalogDatabase() ? "catalog-db" : isMetabaseConfigured() ? "metabase" : "mock",
     tryOn: isOpenRouterConfigured() ? "openrouter" : "disabled",
   });
 });
@@ -225,19 +215,19 @@ app.get("/api/products", async (request, response) => {
 
   response.json({
     products,
-    source: hasSpreadsheetCatalog() ? "spreadsheet" : isMetabaseConfigured() ? "metabase-or-fallback" : "mock",
+    source: hasCatalogDatabase() ? "catalog-db" : isMetabaseConfigured() ? "metabase-or-fallback" : "mock",
   });
 });
 
 app.get("/api/inventory/:productId", async (request, response) => {
   const { productId } = request.params;
   const currentStoreId = request.query.currentStoreId || CURRENT_STORE_ID;
-  const spreadsheetProduct = getSpreadsheetProduct(productId);
+  const catalogProduct = getCatalogProduct(productId);
 
-  if (spreadsheetProduct) {
+  if (catalogProduct) {
     response.json({
       inventory: buildInventoryResponse(productId, currentStoreId),
-      source: "spreadsheet",
+      source: "catalog-db",
     });
     return;
   }
