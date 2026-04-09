@@ -6,18 +6,39 @@ const MODEL_FALLBACKS = [
   "google/gemini-2.5-flash-image",
 ];
 
-function buildTryOnPrompt({ productName, color, size, material, fit }) {
+function resolveGarmentPlacement({ category, productName }) {
+  const text = `${category || ""} ${productName || ""}`.toLowerCase();
+  const isLowerBody = ["track pants", "pants", "joggers", "shorts", "tights", "leggings", "bottom"].some((token) =>
+    text.includes(token),
+  );
+
+  return {
+    isLowerBody,
+    garmentLabel: isLowerBody ? "lower-body garment" : "upper-body garment",
+  };
+}
+
+function buildTryOnPrompt({ productName, color, size, material, fit, category }) {
+  const placement = resolveGarmentPlacement({ category, productName });
+
   return [
     "Create a realistic virtual try-on edit of the person in the first image.",
     "Keep the person's face, body shape, pose, skin tone, and camera framing intact.",
-    "Replace the person's current upper garment with the clothing from the reference image.",
+    placement.isLowerBody
+      ? "Replace only the person's lower-body garment (pants/shorts/leggings area) with the clothing from the reference image."
+      : "Replace only the person's upper-body garment (tee/top/jacket area) with the clothing from the reference image.",
+    placement.isLowerBody
+      ? "Keep the top garment realistic and unchanged."
+      : "Keep the lower garment realistic and unchanged.",
     `Dress them in a ${color} ${productName}.`,
-    `The T-shirt should look like a ${fit.toLowerCase()} fit in size ${size}.`,
+    `The ${placement.garmentLabel} should look like a ${String(fit || "regular").toLowerCase()} fit in size ${size}.`,
     material ? `Material look: ${material}.` : "",
+    placement.isLowerBody
+      ? "Ensure waistband, hips, thighs, knees, and lower silhouette align naturally with the body."
+      : "Ensure shoulders, chest, sleeves, and torso align naturally with the body.",
     "Use the second image as the garment style reference.",
     "Do not place a flat mockup, mannequin overlay, transparent shirt graphic, or sizing guide on top of the body.",
-    "The final shirt must follow the person's shoulders, chest, sleeves, and torso naturally.",
-    "The result should feel like a real fitting-room preview.",
+    "The result should feel like a real fitting-room preview photo.",
     "Do not add extra accessories, props, text, brand posters, split screens, or additional people.",
     "Do not change the background unless needed for natural lighting consistency.",
     "Return one polished image only.",
@@ -74,7 +95,7 @@ function shouldTryNextModel(status, message) {
   );
 }
 
-export async function generateTryOnImage({ personImage, referenceImage, productName, color, size, material, fit }) {
+export async function generateTryOnImage({ personImage, referenceImage, productName, color, size, material, fit, category }) {
   if (!isOpenRouterConfigured()) {
     throw new Error("OpenRouter API key is missing.");
   }
@@ -87,6 +108,7 @@ export async function generateTryOnImage({ personImage, referenceImage, productN
     size,
     material,
     fit,
+    category,
   };
   const candidateModels = [...new Set(MODEL_FALLBACKS.filter(Boolean))];
   const attemptErrors = [];

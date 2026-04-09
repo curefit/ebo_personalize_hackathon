@@ -36,6 +36,7 @@ function normalizeGenderLabel(value = "") {
     content.includes("womens") ||
     content.includes("woman's") ||
     content.includes("women's") ||
+    content.includes("tregging") ||
     content.includes("sports bra") ||
     content.includes("bralette")
   ) {

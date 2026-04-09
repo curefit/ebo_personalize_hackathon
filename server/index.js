@@ -5,12 +5,21 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { getAdminUsersPreview, loginAdmin, requireAdmin } from "./adminAuth.js";
 import { getBackOfficeSnapshot, runShopifySync, saveShopifySettings } from "./catalogSyncService.js";
-import { countCatalogProducts, getCatalogProduct, getCatalogProducts, hasCatalogDatabase } from "./catalogDb.js";
+import {
+  countCatalogProducts,
+  getCatalogProduct,
+  getCatalogProductIdsBySkus,
+  getCatalogProducts,
+  hasCatalogDatabase,
+} from "./catalogDb.js";
+import { getCohortRecommendedSkus } from "./cohortRecommendationService.js";
 import {
   fetchCultAppMemberByPhone,
+  fetchItemDetailsSummaryBySkus,
   fetchInventoryFromMetabase,
   fetchNearbyStoresFromMetabase,
   fetchProductsFromMetabase,
+  fetchUserCohortByUserId,
 } from "./metabaseService.js";
 import { isMetabaseConfigured } from "./metabaseConfig.js";
 import { isOpenRouterConfigured } from "./openrouterConfig.js";
@@ -26,9 +35,206 @@ const port = process.env.PORT || 8787;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const distPath = path.resolve(__dirname, "../dist");
+const MEMBER_COHORT_TIMEOUT_MS = Number(process.env.MEMBER_COHORT_TIMEOUT_MS || 3500);
+const ITEM_DETAILS_CACHE_TTL_MS = Number(process.env.ITEM_DETAILS_CACHE_TTL_MS || 20 * 60 * 1000);
+const itemDetailsSummaryCache = new Map();
 
 app.use(cors());
 app.use(express.json({ limit: "20mb" }));
+
+function normalizeGenderPreference(value = "") {
+  const normalized = String(value || "").trim().toLowerCase();
+
+  if (["men", "male", "man", "m"].includes(normalized)) {
+    return "Men";
+  }
+
+  if (["women", "woman", "female", "lady", "f"].includes(normalized)) {
+    return "Women";
+  }
+
+  if (["unisex", "any", "all", "neutral"].includes(normalized)) {
+    return "Any";
+  }
+
+  return "";
+}
+
+function normalizeSkuCode(value = "") {
+  return String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function isGenderCompatible(productGender, preferredGender, productContext = "") {
+  const normalizedPreference = normalizeGenderPreference(preferredGender);
+  if (!normalizedPreference || normalizedPreference === "Any") {
+    return true;
+  }
+
+  const normalizedContext = String(productContext || "").toLowerCase();
+  if (normalizedPreference === "Men" && normalizedContext.includes("tregging")) {
+    return false;
+  }
+
+  const normalizedProductGender = normalizeGenderPreference(productGender) || "Any";
+  return normalizedProductGender === normalizedPreference;
+}
+
+function dedupeProductsById(products = []) {
+  const deduped = [];
+  const seen = new Set();
+
+  for (const product of products) {
+    if (!product?.id || seen.has(product.id)) {
+      continue;
+    }
+
+    seen.add(product.id);
+    deduped.push(product);
+  }
+
+  return deduped;
+}
+
+async function fetchItemDetailsBySkusWithCache(skus = []) {
+  if (!isMetabaseConfigured()) {
+    return {};
+  }
+
+  const normalizedSkus = [...new Set(skus.map(normalizeSkuCode).filter(Boolean))];
+  if (!normalizedSkus.length) {
+    return {};
+  }
+
+  const now = Date.now();
+  const detailsBySku = {};
+  const missingSkus = [];
+
+  for (const sku of normalizedSkus) {
+    const cached = itemDetailsSummaryCache.get(sku);
+    if (cached && now - cached.updatedAt < ITEM_DETAILS_CACHE_TTL_MS) {
+      detailsBySku[sku] = cached.value;
+      continue;
+    }
+
+    missingSkus.push(sku);
+  }
+
+  if (missingSkus.length) {
+    try {
+      const rows = await fetchItemDetailsSummaryBySkus(missingSkus);
+      for (const row of rows) {
+        const skuCode = normalizeSkuCode(row.sku_code);
+        if (!skuCode) {
+          continue;
+        }
+
+        const value = {
+          gender: normalizeGenderPreference(row.gender) || "Any",
+          item_status: String(row.item_status || "Unknown"),
+        };
+        itemDetailsSummaryCache.set(skuCode, { value, updatedAt: now });
+        detailsBySku[skuCode] = value;
+      }
+
+      for (const sku of missingSkus) {
+        if (detailsBySku[sku]) {
+          continue;
+        }
+
+        const fallback = {
+          gender: "Any",
+          item_status: "Unknown",
+        };
+        itemDetailsSummaryCache.set(sku, { value: fallback, updatedAt: now });
+        detailsBySku[sku] = fallback;
+      }
+    } catch (error) {
+      console.warn("Item details summary fetch failed.", error.message);
+    }
+  }
+
+  return detailsBySku;
+}
+
+async function getPrioritizedCohortProductIds(cohort, preferredGender) {
+  const cohortSkus = getCohortRecommendedSkus(cohort, 140).map(normalizeSkuCode).filter(Boolean);
+  if (!cohortSkus.length || !hasCatalogDatabase()) {
+    return [];
+  }
+
+  const skuDetailsByCode = await fetchItemDetailsBySkusWithCache(cohortSkus);
+  const skuToProductId = getCatalogProductIdsBySkus(cohortSkus);
+  const prioritizedProductIds = [];
+  const seenProductIds = new Set();
+
+  for (const sku of cohortSkus) {
+    const productId = skuToProductId[sku];
+    if (!productId || seenProductIds.has(productId)) {
+      continue;
+    }
+
+    const detail = skuDetailsByCode[sku];
+    const normalizedStatus = String(detail?.item_status || "").trim().toLowerCase();
+    if (["inactive", "deactive", "disabled", "blocked", "discontinued"].some((status) => normalizedStatus.includes(status))) {
+      continue;
+    }
+
+    if (!isGenderCompatible(detail?.gender, preferredGender)) {
+      continue;
+    }
+
+    seenProductIds.add(productId);
+    prioritizedProductIds.push(productId);
+  }
+
+  return prioritizedProductIds;
+}
+
+function promoteRecommendations(baseRankedProducts, poolProducts, prioritizedProductIds, limit) {
+  const rankedMap = new Map(baseRankedProducts.map((product) => [product.id, product]));
+  const poolMap = new Map(poolProducts.map((product) => [product.id, product]));
+  const selected = [];
+  const used = new Set();
+
+  for (const productId of prioritizedProductIds) {
+    if (used.has(productId)) {
+      continue;
+    }
+
+    const fromRanked = rankedMap.get(productId);
+    const fromPool = poolMap.get(productId);
+    const product = fromRanked || fromPool;
+    if (!product) {
+      continue;
+    }
+
+    used.add(productId);
+    selected.push({
+      ...product,
+      recommendationReason: "Recommended for you",
+      recommendedForYou: true,
+    });
+
+    if (selected.length >= limit) {
+      return selected.map((item, index) => ({ ...item, ranking: index + 1 }));
+    }
+  }
+
+  for (const product of baseRankedProducts) {
+    if (used.has(product.id)) {
+      continue;
+    }
+
+    used.add(product.id);
+    selected.push(product);
+
+    if (selected.length >= limit) {
+      break;
+    }
+  }
+
+  return selected.slice(0, limit).map((item, index) => ({ ...item, ranking: index + 1 }));
+}
 
 function withStoreMeta(entry) {
   const store = STORES.find((item) => item.store_id === entry.store_id);
@@ -218,23 +424,68 @@ async function buildExperiencePayload() {
 }
 
 async function buildRecommendationPayload(profile, limit = 10) {
-  const candidateProducts = await getProducts({
+  const normalizedProfileGender = normalizeGenderPreference(profile?.gender) || "Any";
+  const baseFilters = {
     currentStoreId: CURRENT_STORE_ID,
     activity: profile?.activity,
     fit: profile?.preferred_fit,
     material: profile?.material_preference,
-    gender: profile?.gender,
-    limit: 160,
+    gender: normalizedProfileGender === "Any" ? "" : normalizedProfileGender,
+  };
+
+  const candidateProducts = await getProducts({
+    ...baseFilters,
+    limit: 220,
   });
 
-  const widenedCandidates = candidateProducts.length >= Math.max(limit, 18)
+  const genderScopedCandidates = normalizedProfileGender === "Any"
     ? candidateProducts
-    : await getProducts({ currentStoreId: CURRENT_STORE_ID, limit: 220 });
+    : candidateProducts.filter((product) =>
+      isGenderCompatible(product.gender, normalizedProfileGender, `${product?.name || ""} ${product?.category || ""}`));
 
-  const recommendations = getRecommendations(widenedCandidates, profile, limit);
+  const widenedCandidates = genderScopedCandidates.length >= Math.max(limit, 20)
+    ? genderScopedCandidates
+    : dedupeProductsById([
+      ...genderScopedCandidates,
+      ...(await getProducts({
+        currentStoreId: CURRENT_STORE_ID,
+        gender: normalizedProfileGender === "Any" ? "" : normalizedProfileGender,
+        limit: 340,
+      })).filter((product) =>
+        isGenderCompatible(product.gender, normalizedProfileGender, `${product?.name || ""} ${product?.category || ""}`)),
+    ]);
+
+  const activeProfile = {
+    ...profile,
+    gender: normalizedProfileGender,
+  };
+
+  const cohortSupportPool = profile?.cohort
+    ? dedupeProductsById([
+      ...widenedCandidates,
+      ...(await getProducts({
+        currentStoreId: CURRENT_STORE_ID,
+        gender: normalizedProfileGender === "Any" ? "" : normalizedProfileGender,
+        limit: 360,
+      })).filter((product) =>
+        isGenderCompatible(product.gender, normalizedProfileGender, `${product?.name || ""} ${product?.category || ""}`)),
+    ])
+    : widenedCandidates;
+
+  const baselineRecommendations = getRecommendations(cohortSupportPool, activeProfile, Math.max(limit * 4, 24));
+  const prioritizedProductIds = await getPrioritizedCohortProductIds(profile?.cohort, normalizedProfileGender);
+  const recommendations = promoteRecommendations(baselineRecommendations, cohortSupportPool, prioritizedProductIds, limit);
+
+  const profileSummary = summarizeProfile({
+    ...activeProfile,
+    style_note:
+      prioritizedProductIds.length > 0
+        ? `${profile?.style_note || ""} recommended for you`.trim()
+        : profile?.style_note,
+  });
 
   return {
-    profileSummary: summarizeProfile(profile),
+    profileSummary,
     recommendations,
   };
 }
@@ -244,19 +495,39 @@ async function getMember(phone) {
     try {
       const metabaseMember = await fetchCultAppMemberByPhone(phone);
       if (metabaseMember) {
+        const memberUserId = String(metabaseMember.user_id || "").trim();
+        let cohort = null;
+
+        if (memberUserId) {
+          try {
+            const cohortRow = await Promise.race([
+              fetchUserCohortByUserId(memberUserId),
+              new Promise((_, reject) => {
+                setTimeout(() => reject(new Error("Member cohort query timed out.")), MEMBER_COHORT_TIMEOUT_MS);
+              }),
+            ]);
+            cohort = cohortRow?.cohort || null;
+          } catch (cohortError) {
+            console.warn("Member cohort fetch failed.", cohortError.message);
+          }
+        }
+
         const firstName = metabaseMember.firstname?.trim?.() || "";
         const lastName = metabaseMember.lastname?.trim?.() || "";
         const resolvedName = [firstName, lastName].filter(Boolean).join(" ").trim();
+        const resolvedGender = normalizeGenderPreference(metabaseMember.gender) || "Any";
 
         return {
+          user_id: memberUserId || null,
           phone,
           name: resolvedName || "Cult Member",
           activity: "Gym",
           fitness_level: "Member",
           preferred_fit: "Regular",
           material_preference: "Moisture-wicking",
-          gender: "Any",
+          gender: resolvedGender,
           metabase_phone: metabaseMember.phone,
+          cohort,
           source: "metabase",
         };
       }
@@ -455,7 +726,7 @@ app.get("/api/inventory/:productId", async (request, response) => {
 });
 
 app.post("/api/tryon", async (request, response) => {
-  const { personImage, referenceImage, productName, color, size, material, fit } = request.body || {};
+  const { personImage, referenceImage, productName, color, size, material, fit, category } = request.body || {};
 
   if (!personImage || !referenceImage || !productName || !color || !size) {
     response.status(400).json({ message: "Missing try-on inputs." });
@@ -478,6 +749,7 @@ app.post("/api/tryon", async (request, response) => {
       size,
       material,
       fit,
+      category,
     });
 
     response.json({
