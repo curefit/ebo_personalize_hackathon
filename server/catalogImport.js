@@ -12,6 +12,79 @@ function unique(values) {
   return [...new Set(values.filter(Boolean))];
 }
 
+function normalizeGenderLabel(value = "") {
+  const content = String(value).toLowerCase();
+
+  if (!content.trim()) {
+    return "";
+  }
+
+  if (
+    content.includes("unisex") ||
+    content.includes("all gender") ||
+    content.includes("all genders") ||
+    content.includes("everyone")
+  ) {
+    return "Unisex";
+  }
+
+  if (
+    content.includes("kid") ||
+    content.includes("child") ||
+    content.includes("boys") ||
+    content.includes("girls") ||
+    content.includes("junior")
+  ) {
+    return "Kids";
+  }
+
+  if (
+    content.includes("women") ||
+    content.includes("woman") ||
+    content.includes("female") ||
+    content.includes("ladies") ||
+    content.includes("womens") ||
+    content.includes("woman's") ||
+    content.includes("women's") ||
+    content.includes("sports bra") ||
+    content.includes("bralette")
+  ) {
+    return "Women";
+  }
+
+  if (
+    content.includes("men") ||
+    content.includes("man") ||
+    content.includes("male") ||
+    content.includes("mens") ||
+    content.includes("man's") ||
+    content.includes("men's")
+  ) {
+    return "Men";
+  }
+
+  return "";
+}
+
+function mergeGender(currentGender, nextGender) {
+  const current = normalizeGenderLabel(currentGender) || "Unisex";
+  const next = normalizeGenderLabel(nextGender) || "Unisex";
+
+  if (current === next) {
+    return current;
+  }
+
+  if (current === "Unisex") {
+    return next;
+  }
+
+  if (next === "Unisex") {
+    return current;
+  }
+
+  return "Unisex";
+}
+
 function inferActivity(text) {
   const content = String(text).toLowerCase();
   if (content.includes("yoga")) return "Yoga";
@@ -35,6 +108,38 @@ function inferMaterial(text) {
   if (content.includes("moisture") || content.includes("dry")) return "Moisture-wicking";
   if (content.includes("blend")) return "Blend";
   return "Performance Fabric";
+}
+
+function inferGender(row = {}) {
+  const explicitValue =
+    row.Gender ||
+    row.gender ||
+    row["Product Gender"] ||
+    row["Target Gender"] ||
+    row["Audience"];
+
+  const explicitGender = normalizeGenderLabel(explicitValue);
+  if (explicitGender) {
+    return explicitGender;
+  }
+
+  const contextText = [
+    row.Title,
+    row.Type,
+    row.Tags,
+    row["Body HTML"],
+    row["Product Category"],
+    row["Collection"],
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const inferredGender = normalizeGenderLabel(contextText);
+  if (inferredGender) {
+    return inferredGender;
+  }
+
+  return "Unisex";
 }
 
 function isSupportedProduct(type) {
@@ -98,6 +203,7 @@ export function parseProductsExport(filePath) {
       const description = stripHtml(row["Body HTML"]);
       const activity = inferActivity(`${row.Title} ${row.Tags} ${description}`);
       const material = inferMaterial(`${row.Title} ${row.Tags} ${description}`);
+      const gender = inferGender(row);
 
       groups.set(handle, {
         id: String(row.ID || handle),
@@ -106,6 +212,7 @@ export function parseProductsExport(filePath) {
         price: Number(row["Variant Price"] || row["Price / India"] || 0),
         compare_at_price: Number(row["Variant Compare At Price"] || row["Compare At Price / India"] || 0),
         category: row.Type,
+        gender,
         image_url: row["Image Src"] || row["Variant Image"] || "",
         material,
         material_tag: material,
@@ -124,6 +231,7 @@ export function parseProductsExport(filePath) {
     }
 
     const product = groups.get(handle);
+    product.gender = mergeGender(product.gender, inferGender(row));
     const color = getOptionValue(row, "Color");
     const size = getOptionValue(row, "Size");
     const variantQty = Number(row["Variant Inventory Qty"] || 0);

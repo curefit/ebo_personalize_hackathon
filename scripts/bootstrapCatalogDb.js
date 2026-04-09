@@ -37,6 +37,7 @@ const insertProduct = db.prepare(`
     price,
     compare_at_price,
     category,
+    gender,
     image_url,
     material,
     material_tag,
@@ -50,7 +51,7 @@ const insertProduct = db.prepare(`
     vendor,
     total_inventory_qty,
     reason
-  ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const insertVariant = db.prepare(`
@@ -88,6 +89,7 @@ try {
       Number(product.price || 0),
       Number(product.compare_at_price || 0),
       product.category,
+      product.gender || "Unisex",
       product.image_url,
       product.material,
       product.material_tag,

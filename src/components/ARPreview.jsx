@@ -40,6 +40,7 @@ export default function ARPreview({ product, onClose }) {
   const [cameraError, setCameraError] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [captureCountdown, setCaptureCountdown] = useState(0);
+  const [capturedFrame, setCapturedFrame] = useState("");
   const [resultImage, setResultImage] = useState("");
   const [generationError, setGenerationError] = useState("");
   const [framing, setFraming] = useState({ scale: 0.92, offsetY: 0 });
@@ -123,6 +124,7 @@ export default function ARPreview({ product, onClose }) {
     setCameraError("");
     setIsGenerating(false);
     setCaptureCountdown(0);
+    setCapturedFrame("");
     setResultImage("");
     setGenerationError("");
     setFraming({ scale: 0.92, offsetY: 0 });
@@ -307,6 +309,7 @@ export default function ARPreview({ product, onClose }) {
       setGenerationError("");
       setIsGenerating(true);
       const personImage = captureFrame();
+      setCapturedFrame(personImage);
       const payload = await generateTryOn({
         personImage,
         referenceImage: product.image_url,
@@ -393,6 +396,8 @@ export default function ARPreview({ product, onClose }) {
           <div className="camera-shell">
             {resultImage ? (
               <img src={resultImage} alt={`${product.name} try-on result`} className="camera-feed result-feed" />
+            ) : capturedFrame ? (
+              <img src={capturedFrame} alt="Captured frame" className="camera-feed result-feed captured-feed" />
             ) : (
               <video
                 ref={videoRef}
@@ -508,6 +513,7 @@ export default function ARPreview({ product, onClose }) {
                 type="button"
                 className="ghost-button"
                 onClick={() => {
+                  setCapturedFrame("");
                   setResultImage("");
                   setGenerationError("");
                 }}

@@ -1,0 +1,15 @@
+services:
+  ebo-kiosk:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8787:8787"
+    env_file:
+      - .env
+    environment:
+      PORT: 8787
+      CATALOG_DB_PATH: /app/data/catalog.sqlite
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
